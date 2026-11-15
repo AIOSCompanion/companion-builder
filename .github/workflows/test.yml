@@ -1,0 +1,191 @@
+name: PR tests (companion-builder)
+
+# Dispatched by a maintainer or the automation with a private repo and a PR head SHA. There is no
+# pull_request trigger: fork PRs never run here, and no private-repo workflow is started.
+# The tests run the PR head's code, so the test jobs hold no secret at all. The only token in
+# this file is the App token in the status job, and it is created in that job alone.
+#
+# Trust boundary (see builder/README.md): the trusted scripts are copied out of the workspace, hashed
+# and made read-only before any PR code runs. The PR's install and tests run as a separate user with a
+# clean environment, inside a namespace with only loopback. The sealed output goes to RUNNER_TEMP.
+# Every step here is a one-line call.
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: Private repository that holds the PR
+        required: true
+        type: choice
+        options: [aios-desktop-app, aiosxaegra, companion-memory]
+      head_sha:
+        description: Full 40-character head commit SHA of the PR
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-tests-${{ inputs.repository }}-${{ inputs.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: Choose the suites for this repository
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+    steps:
+      - name: Check out the builder (this public repo)
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Pick the suites (the matrix is fixed in scripts/plan_suites.py; the input only selects a row)
+        id: pick
+        env:
+          REPOSITORY: ${{ inputs.repository }}
+        run: python3 -B scripts/plan_suites.py --repository "$REPOSITORY"
+
+  suite:
+    name: ${{ matrix.suite }}
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      LOG_RECIPIENT: ${{ vars.TEST_LOG_RECIPIENT }}
+    steps:
+      - name: Check out the builder (this public repo)
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # Before any PR code: the trusted scripts leave the workspace, are hashed and become read-only.
+      - name: Snapshot the trusted scripts outside the workspace
+        run: python3 -I -B scripts/snapshot_trusted.py snapshot --dest "$RUNNER_TEMP/trusted"
+
+      # The PR head is the code under test. Its token is read-only and is not kept in the git config.
+      - name: Create a read-only App token for the private repo
+        id: checkout-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.BUILDER_APP_ID }}
+          private-key: ${{ secrets.BUILDER_APP_PRIVATE_KEY }}
+          owner: AIOSCompanion
+          repositories: ${{ inputs.repository }}
+          permission-contents: read
+
+      - name: Check out the PR head into pr/ (contents read only)
+        uses: actions/checkout@v4
+        with:
+          repository: AIOSCompanion/${{ inputs.repository }}
+          ref: ${{ inputs.head_sha }}
+          token: ${{ steps.checkout-token.outputs.token }}
+          path: pr
+          persist-credentials: false
+
+      - name: Import the team's public log key (a variable, not a secret)
+        env:
+          TEST_LOG_PUBLIC_KEY: ${{ vars.TEST_LOG_PUBLIC_KEY }}
+        run: printf '%s\n' "$TEST_LOG_PUBLIC_KEY" | gpg --batch --import >/dev/null 2>&1
+
+      - name: Set up Node
+        if: matrix.repo == 'aios-desktop-app'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Set up Python
+        if: matrix.repo != 'aios-desktop-app'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Create the untrusted test user and hand it the PR checkout
+        run: python3 -I -B "$RUNNER_TEMP/trusted/prepare_untrusted.py" --user pr-tests --checkout pr --home "$HOME"
+
+      # The PR's install runs as the test user: it keeps egress (the only step that may fetch packages), and its
+      # output is sealed. It cannot write the trusted scripts or read this process's environment.
+      - name: Install dependencies (as the test user, output sealed)
+        working-directory: pr
+        env:
+          SETUP_COMMAND: ${{ matrix.setup }}
+          SEALED_LOG_DIR: ${{ runner.temp }}/sealed/logs
+        run: python3 -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "install dependencies" --log-dir "$SEALED_LOG_DIR" --recipient "$LOG_RECIPIENT" --as-user pr-tests -- bash -c "$SETUP_COMMAND"
+
+      # Calibration before the claim: the probe must reach github.com outside the namespace, and inside it only
+      # loopback may exist and the connection must be refused (curl exit 6 or 7).
+      - name: Prove the test namespace is isolated (and the probe reaches out outside it)
+        run: python3 -I -B "$RUNNER_TEMP/trusted/egress_probe.py"
+
+      # Calibrated: the runner's own empty append to GITHUB_ENV must succeed, and the test user's must be denied for
+      # GITHUB_ENV and for the trusted snapshot. A failure stops the run before the suite.
+      - name: Prove the test user cannot write the runner's file-command files or the trusted snapshot
+        run: python3 -I -B "$RUNNER_TEMP/trusted/permission_probe.py" --trusted "$RUNNER_TEMP/trusted" --workdir pr --workspace "$GITHUB_WORKSPACE" --path "$PATH" --home "$HOME"
+
+      - name: Verify the trusted scripts before the suite
+        run: python3 -I -B "$RUNNER_TEMP/trusted/snapshot_trusted.py" verify --dest "$RUNNER_TEMP/trusted"
+
+      # The suite runs as the test user, in the namespace, with its output sealed and its junit counted. A failing
+      # suite fails this step, so the status step reports failure.
+      - name: Run the suite with no network (output sealed)
+        working-directory: pr
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          TEST_COMMAND: ${{ matrix.run }}
+          SUITE_NAME: ${{ matrix.suite }}
+          SEALED_LOG_DIR: ${{ runner.temp }}/sealed/logs
+        run: python3 -I -B "$RUNNER_TEMP/trusted/run_suite.py"
+
+      # The junit file was written by the PR's tests, so the workflow removes it (the wrapper sealed a copy).
+      - name: Remove the untrusted junit report
+        if: always()
+        run: sudo -n rm -f pr/junit.xml
+
+      - name: Verify the trusted scripts before upload
+        if: always()
+        run: python3 -I -B "$RUNNER_TEMP/trusted/snapshot_trusted.py" verify --dest "$RUNNER_TEMP/trusted"
+
+      - name: Keep only the sealed .gpg files, for 1 day
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sealed-${{ matrix.repo }}-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/sealed/**/*.gpg
+          retention-days: 1
+          if-no-files-found: ignore
+
+  status:
+    name: Post the status to the private PR head
+    needs: suite
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the builder (this public repo)
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Create an App token with statuses write (this token exists only in this step)
+        id: status-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.BUILDER_APP_ID }}
+          private-key: ${{ secrets.BUILDER_APP_PRIVATE_KEY }}
+          owner: AIOSCompanion
+          repositories: ${{ inputs.repository }}
+          permission-statuses: write
+
+      - name: Post companion-builder/tests on the head commit
+        env:
+          GH_TOKEN: ${{ steps.status-token.outputs.token }}
+          REPOSITORY: ${{ inputs.repository }}
+          SHA: ${{ inputs.head_sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          NEEDS_RESULT: ${{ needs.suite.result }}
+        run: python3 -B scripts/post_status.py

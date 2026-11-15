@@ -1,0 +1,737 @@
+name: Companion release builds (public builder)
+
+# Dispatched by the repository owner only: no pull_request, no pull_request_target, no fork trigger. The private
+# repository holds all release logic. This file checks out the private tree at one pinned commit and
+# calls its scripts. Every row runs scripts/release/build_row.py, the same entry point the private
+# release.yml runs.
+#
+# Rules for this file:
+#  - every step that runs our code goes through builder/scripts/run_sealed.py, which seals its output
+#    to the team log key and prints only the step name, exit code, duration and error class;
+#  - every step is a one-line call, or an action that has to be YAML;
+#  - the publish credential (PUBLISH_RELEASES_TOKEN) is given to the individual steps that touch the
+#    releases repository, never to a whole job.
+#
+# Hosted runners only: macos-15 (arm64), windows-2022. No self-hosted runner, no Linux package build.
+# Deliberate omissions: no Intel x64 row, store-only libSQL (no artifact fallback), no timing upload.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag in AIOSCompanion/aios-desktop-app (for example v0.18.1)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: builder-release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  # Every job waits for the owner's approval in the release-signing environment (required reviewer), and
+  # its deployment-branch rule admits only tags matching v*.
+
+  source:
+    name: Pin the tag and create the draft
+    runs-on: ubuntu-latest
+    environment: release-signing
+    env:
+      LOG_RECIPIENT: ${{ vars.TEST_LOG_RECIPIENT }}
+    outputs:
+      ref_type: ${{ steps.refkind.outputs.ref_type }}
+      src_sha: ${{ steps.pin.outputs.src_sha }}
+      aegra_sha: ${{ steps.refs.outputs.aegra_sha }}
+      memory_sha: ${{ steps.refs.outputs.memory_sha }}
+    steps:
+      - name: Refuse anything but a dispatch from this repository's main branch
+        run: test "$GITHUB_REF" = "refs/heads/main"
+
+      - name: Create a read-only App token for the three private repositories
+        id: app
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.BUILDER_APP_ID }}
+          private-key: ${{ secrets.BUILDER_APP_PRIVATE_KEY }}
+          owner: AIOSCompanion
+          repositories: aios-desktop-app,aiosxaegra,companion-memory,aios-companion-releases
+          permission-contents: read
+
+      # The ref as dispatched, not a tag path: a branch name must reach the preflight and be refused there.
+      - name: Check out the private desktop repository at the dispatched ref
+        uses: actions/checkout@v4
+        with:
+          repository: AIOSCompanion/aios-desktop-app
+          ref: ${{ inputs.tag }}
+          token: ${{ steps.app.outputs.token }}
+          persist-credentials: false
+
+      - name: Check out the public builder (scripts that seal the logs)
+        uses: actions/checkout@v4
+        with:
+          repository: AIOSCompanion/companion-builder
+          path: builder
+          persist-credentials: false
+
+      # Trusted scripts are copied outside the workspace, hashed and made read-only before any other code runs.
+      - name: Snapshot the trusted scripts outside the workspace
+        run: python3 -I -B builder/scripts/snapshot_trusted.py snapshot --dest "$RUNNER_TEMP/trusted"
+
+      # The ref kind is read from the repository, not from the dispatch form. Only a tag is "tag".
+      - name: Read the ref kind (tag or branch)
+        id: refkind
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          TAG: ${{ inputs.tag }}
+        run: echo "ref_type=$(gh api "repos/AIOSCompanion/aios-desktop-app/git/ref/tags/$TAG" >/dev/null 2>&1 && echo tag || echo branch)" >> "$GITHUB_OUTPUT"
+
+      - name: Record the commit the ref points at
+        id: pin
+        run: echo "src_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Import the team's public log key (a variable, not a secret)
+        env:
+          TEST_LOG_PUBLIC_KEY: ${{ vars.TEST_LOG_PUBLIC_KEY }}
+        run: printf '%s\n' "$TEST_LOG_PUBLIC_KEY" | gpg --batch --import >/dev/null 2>&1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # The preflight makes no GitHub calls: it reads the package version and the ref kind, and refuses a branch.
+      - name: Validate the release identity and the metadata controls
+        env:
+          RELEASE_REF_TYPE: ${{ steps.refkind.outputs.ref_type }}
+          RELEASE_REF_NAME: ${{ inputs.tag }}
+        run: python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "validate release identity" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" -- python3 -B scripts/release_metadata.py preflight
+
+      - name: Install the metadata helper's dependency
+        run: python3 -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "install metadata helper dependency" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" -- python3 -m pip install --quiet 'PyYAML==6.0.2'
+
+      - name: Resolve the sidecar SHAs (one source of truth for every row)
+        id: refs
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          AEGRA_REF: '167d5c8c5e4ef227fa6cd8410ab9f949a661ed07'
+          MEMORY_REF: '821d32b9005f885cdec52b6712184fe1c41c77ff'
+          EXPECTED_AEGRA_SHA: '167d5c8c5e4ef227fa6cd8410ab9f949a661ed07'
+          EXPECTED_MEMORY_SHA: '821d32b9005f885cdec52b6712184fe1c41c77ff'
+        run: python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "resolve sidecar pins" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" --export-output aegra_sha --export-output memory_sha -- python3 -B scripts/release/resolve_pins.py
+
+      # The only step that writes to the releases repository in this job. The write PAT is on this step alone.
+      - name: Ensure the single draft release exists
+        env:
+          GH_TOKEN: ${{ secrets.PUBLISH_RELEASES_TOKEN }}
+          RELEASE_REF_TYPE: ${{ steps.refkind.outputs.ref_type }}
+          RELEASE_REF_NAME: ${{ inputs.tag }}
+        run: python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "ensure the draft release" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" -- python3 -B scripts/release_metadata.py ensure-draft
+
+      - name: Verify the trusted scripts before upload
+        if: always()
+        run: python3 -I -B "$RUNNER_TEMP/trusted/snapshot_trusted.py" verify --dest "$RUNNER_TEMP/trusted"
+
+      - name: Upload the sealed source-job logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sealed-source
+          path: sealed/**/*.gpg
+          retention-days: 1
+          if-no-files-found: warn
+
+  mac-arm64:
+    name: macOS arm64 (signed, notarised)
+    needs: source
+    runs-on: macos-15
+    environment: release-signing
+    timeout-minutes: 75
+    defaults:
+      run:
+        shell: bash
+    env:
+      RELEASE_REF_TYPE: ${{ needs.source.outputs.ref_type }}
+      RELEASE_REF_NAME: ${{ inputs.tag }}
+      BUILD_ROW: mac-arm64
+      LOG_RECIPIENT: ${{ vars.TEST_LOG_RECIPIENT }}
+    steps:
+      - name: Record the row start for the packaging retry budget
+        run: echo "ROW_STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Create a read-only App token for the private repositories
+        id: app
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.BUILDER_APP_ID }}
+          private-key: ${{ secrets.BUILDER_APP_PRIVATE_KEY }}
+          owner: AIOSCompanion
+          repositories: aios-desktop-app,aiosxaegra,companion-memory,aios-companion-releases
+          permission-contents: read
+
+      # The private tree is checked out at the commit the source job recorded, never at a moving tag name.
+      - name: Check out the private desktop repository at the pinned commit
+        uses: actions/checkout@v4
+        with:
+          repository: AIOSCompanion/aios-desktop-app
+          ref: ${{ needs.source.outputs.src_sha }}
+          token: ${{ steps.app.outputs.token }}
+          persist-credentials: false
+
+      - name: Check out the public builder (scripts that seal the logs)
+        uses: actions/checkout@v4
+        with:
+          repository: AIOSCompanion/companion-builder
+          path: builder
+          persist-credentials: false
+
+      # Trusted scripts are copied outside the workspace, hashed and made read-only before any other code runs.
+      - name: Snapshot the trusted scripts outside the workspace
+        run: python3 -I -B builder/scripts/snapshot_trusted.py snapshot --dest "$RUNNER_TEMP/trusted"
+
+      - name: Import the team's public log key (a variable, not a secret)
+        env:
+          TEST_LOG_PUBLIC_KEY: ${{ vars.TEST_LOG_PUBLIC_KEY }}
+        run: printf '%s\n' "$TEST_LOG_PUBLIC_KEY" | gpg --batch --import >/dev/null 2>&1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          architecture: arm64
+          cache: npm
+
+      - name: Install dependencies
+        run: python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "install dependencies" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" -- npm ci --prefer-offline --no-audit --no-fund
+
+      # The libSQL build comes from the desktop repository's immutable store, a pre-release pinned by hash. It is
+      # fetched with the App token, by the explicit repository name (github.repository here is the builder).
+      - name: Read the libSQL store pin
+        id: libsql_store
+        run: python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "read libSQL store pin" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" --export-output has_store --export-output tag --export-output asset --export-output asset_sha256 -- python -B scripts/libsql_store.py state --pin scripts/libsql-macos-accepted.json --arch arm64 --github-output
+
+      - name: Refuse a pin without a store block (the builder has no artifact fallback)
+        if: steps.libsql_store.outputs.has_store != 'true'
+        run: exit 1
+
+      - name: Prepare the store folders
+        run: mkdir -p .run/store-libsql .run/prior-libsql
+
+      - name: Fetch the reviewed libSQL build from the immutable store
+        if: steps.libsql_store.outputs.has_store == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "fetch libSQL build" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" -- gh release download '${{ steps.libsql_store.outputs.tag }}' --repo AIOSCompanion/aios-desktop-app --pattern '${{ steps.libsql_store.outputs.asset }}' --dir .run/store-libsql
+
+      - name: Verify the libSQL build against the pin
+        if: steps.libsql_store.outputs.has_store == 'true'
+        run: python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "verify libSQL build" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" -- python -B scripts/libsql_store.py verify --pin scripts/libsql-macos-accepted.json --arch arm64 --file ".run/store-libsql/${{ steps.libsql_store.outputs.asset }}"
+
+      - name: Extract the verified libSQL build
+        if: steps.libsql_store.outputs.has_store == 'true'
+        run: python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "extract libSQL build" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" -- python -B scripts/libsql_store.py extract --file ".run/store-libsql/${{ steps.libsql_store.outputs.asset }}" --dest .run/prior-libsql
+
+      - name: Stage exact libSQL bytes and verify the native consumers
+        run: python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "stage libSQL" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" -- python -B scripts/libsql_macos_artifacts.py stage --arch arm64 --artifact-root .run/prior-libsql --node "$(command -v node)" --evidence .run/libsql-current-stage
+
+      - name: Materialize the build environment
+        env:
+          DOTENV_PRODUCTION_B64: ${{ secrets.DOTENV_PRODUCTION_B64 }}
+        run: python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "materialize environment" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" -- python -B scripts/release/materialize_env.py
+
+      - name: Validate the required release configuration without printing values
+        run: python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "validate release configuration" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" -- node scripts/validate-release-config.mjs --root .
+
+      - name: Resolve the external runtimes cache key
+        id: runtimes-version
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "runtimes cache key" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" --export-output sha -- python -B scripts/release/runtimes.py key
+
+      - name: Cache external runtimes
+        id: runtimes-cache
+        uses: actions/cache@v4
+        with:
+          path: external_runtimes
+          key: ${{ runner.os }}-${{ runner.arch }}-runtimes-${{ steps.runtimes-version.outputs.sha }}
+
+      - name: Download external runtimes
+        if: steps.runtimes-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "download external runtimes" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" -- python -B scripts/release/runtimes.py fetch --os "${{ runner.os }}"
+
+      - name: Check out the aegra sidecar source at the pin
+        uses: actions/checkout@v4
+        with:
+          repository: AIOSCompanion/aiosxaegra
+          ref: ${{ needs.source.outputs.aegra_sha }}
+          token: ${{ steps.app.outputs.token }}
+          path: .sidecar-src/aiosxaegra
+          persist-credentials: false
+
+      - name: Check out the companion-memory sidecar source at the pin
+        uses: actions/checkout@v4
+        with:
+          repository: AIOSCompanion/companion-memory
+          ref: ${{ needs.source.outputs.memory_sha }}
+          token: ${{ steps.app.outputs.token }}
+          path: .sidecar-src/companion-memory
+          persist-credentials: false
+
+      - name: Stage local-first sidecars
+        env:
+          RELEASE_TIMING_FILE: ${{ runner.temp }}/release-timing.json
+        run: python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "stage local-first sidecars" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" -- python -B scripts/release/build_row.py --row "$BUILD_ROW" --phase sidecars
+
+      - name: Stage android-commander MCP deps
+        run: python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "stage android MCP deps" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" -- python -B scripts/release/build_row.py --row "$BUILD_ROW" --phase android
+
+      - name: Cache Electron & electron-builder
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/electron
+            ~/Library/Caches/electron-builder
+          key: macos-arm64-electron-${{ hashFiles('package-lock.json', 'electron-builder.yml') }}
+          restore-keys: macos-arm64-electron-
+
+      # One step signs, notarises and builds. The certificate and the notary key exist only inside this step: they
+      # are chmod 600, handed to the build through its environment, and deleted when it ends, so no later step can
+      # read their paths. The write PAT is needed because electron-builder publishes the bundles to the draft.
+      - name: Sign, notarise and build mac arm64 (signing material lives only inside this step)
+        env:
+          # Nonsecret canaries: the emitted-bundle guard rejects accidental bakes.
+          COMPOSIO_API_KEY: companion-composio-build-sentinel-20261015
+          GAMMA_API_KEY: companion-gamma-build-sentinel-20261015
+          CSC_LINK_B64: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          GH_TOKEN: ${{ secrets.PUBLISH_RELEASES_TOKEN }}
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          CLOUDFLARE_AUTH_TOKEN: ${{ secrets.CLOUDFLARE_AUTH_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          PACKAGE_SCRIPT: release:mac-arm64
+          ROW_TIMEOUT_SECONDS: 4500
+          RELEASE_TIMING_FILE: ${{ runner.temp }}/release-timing.json
+        run: python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "sign notarise and build mac arm64" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" -- python -I -B scripts/release/signed_row.py --row "$BUILD_ROW"
+
+      # Kept for one day only. This is the manifest the merge needs, not a downloadable build.
+      - name: Stash latest-mac.yml for the merge
+        uses: actions/upload-artifact@v4
+        with:
+          name: latest-mac-arm64
+          path: dist/latest-mac.yml
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Verify the trusted scripts before upload
+        if: always()
+        run: python3 -I -B "$RUNNER_TEMP/trusted/snapshot_trusted.py" verify --dest "$RUNNER_TEMP/trusted"
+
+      - name: Upload the sealed mac logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sealed-mac-arm64
+          path: sealed/**/*.gpg
+          retention-days: 1
+          if-no-files-found: warn
+
+  win:
+    name: Windows x64 (unsigned)
+    needs: source
+    runs-on: windows-2022
+    environment: release-signing
+    timeout-minutes: 75
+    defaults:
+      run:
+        shell: bash
+    env:
+      RELEASE_REF_TYPE: ${{ needs.source.outputs.ref_type }}
+      RELEASE_REF_NAME: ${{ inputs.tag }}
+      BUILD_ROW: win
+      LOG_RECIPIENT: ${{ vars.TEST_LOG_RECIPIENT }}
+    steps:
+      - name: Record the row start for the packaging retry budget
+        run: echo "ROW_STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Create a read-only App token for the private repositories
+        id: app
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.BUILDER_APP_ID }}
+          private-key: ${{ secrets.BUILDER_APP_PRIVATE_KEY }}
+          owner: AIOSCompanion
+          repositories: aios-desktop-app,aiosxaegra,companion-memory,aios-companion-releases
+          permission-contents: read
+
+      - name: Check out the private desktop repository at the pinned commit
+        uses: actions/checkout@v4
+        with:
+          repository: AIOSCompanion/aios-desktop-app
+          ref: ${{ needs.source.outputs.src_sha }}
+          token: ${{ steps.app.outputs.token }}
+          persist-credentials: false
+
+      - name: Check out the public builder (scripts that seal the logs)
+        uses: actions/checkout@v4
+        with:
+          repository: AIOSCompanion/companion-builder
+          path: builder
+          persist-credentials: false
+
+      # Trusted scripts are copied outside the workspace, hashed and made read-only before any other code runs.
+      - name: Snapshot the trusted scripts outside the workspace
+        run: python3 -I -B builder/scripts/snapshot_trusted.py snapshot --dest "$RUNNER_TEMP/trusted"
+
+      - name: Import the team's public log key (a variable, not a secret)
+        env:
+          TEST_LOG_PUBLIC_KEY: ${{ vars.TEST_LOG_PUBLIC_KEY }}
+        run: printf '%s\n' "$TEST_LOG_PUBLIC_KEY" | gpg --batch --import >/dev/null 2>&1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          architecture: x64
+          cache: npm
+
+      - name: Install dependencies
+        run: python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "install dependencies" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" -- npm ci --prefer-offline --no-audit --no-fund
+
+      - name: Materialize the build environment
+        env:
+          DOTENV_PRODUCTION_B64: ${{ secrets.DOTENV_PRODUCTION_B64 }}
+        run: python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "materialize environment" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" -- python -B scripts/release/materialize_env.py
+
+      - name: Validate the required release configuration without printing values
+        run: python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "validate release configuration" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" -- node scripts/validate-release-config.mjs --root .
+
+      - name: Resolve the external runtimes cache key
+        id: runtimes-version
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "runtimes cache key" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" --export-output sha -- python -B scripts/release/runtimes.py key
+
+      - name: Cache external runtimes
+        id: runtimes-cache
+        uses: actions/cache@v4
+        with:
+          path: external_runtimes
+          key: ${{ runner.os }}-${{ runner.arch }}-runtimes-${{ steps.runtimes-version.outputs.sha }}
+
+      - name: Download external runtimes
+        if: steps.runtimes-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "download external runtimes" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" -- python -B scripts/release/runtimes.py fetch --os "${{ runner.os }}"
+
+      - name: Check out the aegra sidecar source at the pin
+        uses: actions/checkout@v4
+        with:
+          repository: AIOSCompanion/aiosxaegra
+          ref: ${{ needs.source.outputs.aegra_sha }}
+          token: ${{ steps.app.outputs.token }}
+          path: .sidecar-src/aiosxaegra
+          persist-credentials: false
+
+      - name: Check out the companion-memory sidecar source at the pin
+        uses: actions/checkout@v4
+        with:
+          repository: AIOSCompanion/companion-memory
+          ref: ${{ needs.source.outputs.memory_sha }}
+          token: ${{ steps.app.outputs.token }}
+          path: .sidecar-src/companion-memory
+          persist-credentials: false
+
+      - name: Stage local-first sidecars
+        env:
+          RELEASE_TIMING_FILE: ${{ runner.temp }}/release-timing.json
+        run: python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "stage local-first sidecars" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" -- python -B scripts/release/build_row.py --row "$BUILD_ROW" --phase sidecars
+
+      - name: Stage android-commander MCP deps
+        run: python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "stage android MCP deps" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" -- python -B scripts/release/build_row.py --row "$BUILD_ROW" --phase android
+
+      - name: Cache Electron & electron-builder
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/AppData/Local/electron/Cache
+            ~/AppData/Local/electron-builder/Cache
+          key: windows-x64-electron-${{ hashFiles('package-lock.json', 'electron-builder.yml') }}
+          restore-keys: windows-x64-electron-
+
+      # The write PAT is needed here because electron-builder publishes the installer to the draft.
+      - name: Build & publish
+        env:
+          COMPOSIO_API_KEY: companion-composio-build-sentinel-20261015
+          GAMMA_API_KEY: companion-gamma-build-sentinel-20261015
+          GH_TOKEN: ${{ secrets.PUBLISH_RELEASES_TOKEN }}
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          CLOUDFLARE_AUTH_TOKEN: ${{ secrets.CLOUDFLARE_AUTH_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          PACKAGE_SCRIPT: release:win
+          ROW_TIMEOUT_SECONDS: 4500
+          RELEASE_TIMING_FILE: ${{ runner.temp }}/release-timing.json
+        run: python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "build and publish windows" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" -- python -B scripts/release/build_row.py --row "$BUILD_ROW" --phase package
+
+      - name: Verify the trusted scripts before upload
+        if: always()
+        run: python3 -I -B "$RUNNER_TEMP/trusted/snapshot_trusted.py" verify --dest "$RUNNER_TEMP/trusted"
+
+      - name: Upload the sealed windows logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sealed-win
+          path: sealed/**/*.gpg
+          retention-days: 1
+          if-no-files-found: warn
+
+  # The packaged install check: the draft's own Windows installer, installed and launched on this runner with
+  # the pinned runtime. Logs and evidence are sealed to the team key by the one final step. The installer is
+  # never uploaded: it is already a release asset.
+  windows-install:
+    name: Install the draft Windows installer and verify it
+    needs: [source, win]
+    runs-on: windows-2022
+    environment: release-signing
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    env:
+      RELEASE_REF_TYPE: ${{ needs.source.outputs.ref_type }}
+      RELEASE_REF_NAME: ${{ inputs.tag }}
+      VERIFY_TAG: ${{ inputs.tag }}
+      VERIFY_DESKTOP_REVISION: ${{ needs.source.outputs.src_sha }}
+      VERIFY_BACKEND_REVISION: ${{ needs.source.outputs.aegra_sha }}
+      VERIFY_MEMORY_REVISION: ${{ needs.source.outputs.memory_sha }}
+      LOG_RECIPIENT: ${{ vars.TEST_LOG_RECIPIENT }}
+    steps:
+      - name: Create a read-only App token for the private repositories
+        id: app
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.BUILDER_APP_ID }}
+          private-key: ${{ secrets.BUILDER_APP_PRIVATE_KEY }}
+          owner: AIOSCompanion
+          repositories: aios-desktop-app,aiosxaegra,companion-memory,aios-companion-releases
+          permission-contents: read
+
+      - name: Check out the private desktop repository at the pinned commit
+        uses: actions/checkout@v4
+        with:
+          repository: AIOSCompanion/aios-desktop-app
+          ref: ${{ needs.source.outputs.src_sha }}
+          token: ${{ steps.app.outputs.token }}
+          persist-credentials: false
+
+      - name: Check out the public builder (scripts that seal the logs)
+        uses: actions/checkout@v4
+        with:
+          repository: AIOSCompanion/companion-builder
+          path: builder
+          persist-credentials: false
+
+      # Trusted scripts are copied outside the workspace, hashed and made read-only before any other code runs.
+      - name: Snapshot the trusted scripts outside the workspace
+        run: python3 -I -B builder/scripts/snapshot_trusted.py snapshot --dest "$RUNNER_TEMP/trusted"
+
+      - name: Import the team's public log key (a variable, not a secret)
+        env:
+          TEST_LOG_PUBLIC_KEY: ${{ vars.TEST_LOG_PUBLIC_KEY }}
+        run: printf '%s\n' "$TEST_LOG_PUBLIC_KEY" | gpg --batch --import >/dev/null 2>&1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          architecture: x64
+
+      - uses: actions/setup-node@v4
+        with:
+          # Includes libuv's fix for the U+10000 Windows filename conversion.
+          node-version: '22.23.3'
+          architecture: x64
+
+      - name: Check the tag, the three pins and the checked-out commit
+        run: python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "check tag and pins" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" -- python -B scripts/release/windows_install_inputs.py refs --tag "$VERIFY_TAG" --desktop-revision "$VERIFY_DESKTOP_REVISION" --backend-revision "$VERIFY_BACKEND_REVISION" --memory-revision "$VERIFY_MEMORY_REVISION"
+
+      - name: Install the pinned test runner
+        run: python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "install pinned test runner" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" -- python -B -m pip install --quiet --disable-pip-version-check --no-cache-dir 'pytest==9.0.3'
+
+      - name: Prepare the evidence folders
+        run: mkdir -p .run/install-logs .run/windows-package-inputs .run/windows-build-job-controls
+
+      - name: Run the install-check control suites
+        run: python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "install-check controls" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" -- python -B scripts/release/windows_install_controls.py --output .run/windows-package-inputs
+
+      - name: Run the build-job controls
+        run: python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "build-job controls" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" -- python -B scripts/verify-windows-build-jobs.py --evidence .run/windows-build-job-controls
+
+      - name: Check out the exact reviewed backend
+        uses: actions/checkout@v4
+        with:
+          repository: AIOSCompanion/aiosxaegra
+          ref: ${{ needs.source.outputs.aegra_sha }}
+          token: ${{ steps.app.outputs.token }}
+          path: .sidecars/aegra
+          persist-credentials: false
+
+      - name: Check out the exact memory
+        uses: actions/checkout@v4
+        with:
+          repository: AIOSCompanion/companion-memory
+          ref: ${{ needs.source.outputs.memory_sha }}
+          token: ${{ steps.app.outputs.token }}
+          path: .sidecars/memory
+          persist-credentials: false
+
+      # The installer goes to RUNNER_TEMP, outside every sealed folder: it is a public release asset.
+      # The script exports WINDOWS_RELEASE_INSTALLER and WINDOWS_RELEASE_INSTALLER_SHA256 to GITHUB_ENV.
+      # The read PAT is on this step alone: GitHub shows a draft only to a token with write access.
+      - name: Download and bind the exact draft-release installer
+        env:
+          GH_TOKEN: ${{ secrets.PUBLISH_RELEASES_TOKEN }}
+        run: python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "bind draft installer" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" --export-env WINDOWS_RELEASE_INSTALLER --export-env WINDOWS_RELEASE_INSTALLER_SHA256 -- python -B scripts/release/windows_install_inputs.py installer --tag "$VERIFY_TAG" --desktop-revision "$VERIFY_DESKTOP_REVISION" --backend-revision "$VERIFY_BACKEND_REVISION" --memory-revision "$VERIFY_MEMORY_REVISION" --output-dir "$RUNNER_TEMP/release-installer" --receipt .run/windows-package-inputs/release-installer.json
+
+      - name: Fetch the exact pinned Windows runtime archive
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "fetch pinned runtime" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" -- python -B scripts/release/windows_install_inputs.py runtime --output "$RUNNER_TEMP/companion-windows-runtime.tar.gz" --receipt .run/windows-package-inputs/runtime-download.json
+
+      - name: Resolve the Windows paths of node, npm and Git Bash
+        run: python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "resolve tool paths" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" --export-env VERIFY_NODE --export-env VERIFY_NPM_CLI --export-env VERIFY_BASH -- python -B scripts/release/windows_tool_paths.py
+
+      # The verifier's own output is sealed. Its stdout and stderr never reach this log.
+      - name: Install, launch, verify and uninstall the exact release installer
+        run: python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "install packaged verifier" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" -- python -B scripts/verify-packaged-windows.py --backend .sidecars/aegra --memory .sidecars/memory --backend-revision "$VERIFY_BACKEND_REVISION" --memory-revision "$VERIFY_MEMORY_REVISION" --archive "$RUNNER_TEMP/companion-windows-runtime.tar.gz" --evidence .run/packaged-windows --node "$VERIFY_NODE" --npm-cli "$VERIFY_NPM_CLI" --bash "$VERIFY_BASH" --desktop-sha "$VERIFY_DESKTOP_REVISION" --installer "$WINDOWS_RELEASE_INSTALLER" --installer-sha256 "$WINDOWS_RELEASE_INSTALLER_SHA256"
+
+      - name: Export the complete diagnostic evidence
+        if: always()
+        run: python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "export diagnostic evidence" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" -- python -B scripts/export_windows_package_evidence.py --output .run/windows-evidence-parts
+
+      # The one sealing step for every evidence folder. Each file is encrypted to the team key and its plaintext
+      # removed only after its ciphertext exists. This step prints only its own verdict and counts.
+      - name: Seal every evidence folder to the team key
+        if: always()
+        run: python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "seal evidence folders" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" --seal-dir .run/install-logs --seal-dir .run/windows-package-inputs --seal-dir .run/windows-build-job-controls --seal-dir .run/packaged-windows --seal-dir .run/windows-evidence-parts -- python -c "pass"
+
+      - name: Verify the trusted scripts before upload
+        if: always()
+        run: python3 -I -B "$RUNNER_TEMP/trusted/snapshot_trusted.py" verify --dest "$RUNNER_TEMP/trusted"
+
+      # One day only, and encrypted, per the artifact policy.
+      - name: Keep only the sealed files, for one day
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-install-sealed
+          path: sealed/**/*.gpg
+          retention-days: 1
+          if-no-files-found: warn
+
+  # The arm64 manifest is merged into one latest-mac.yml and checked on the draft, after both rows and the
+  # install check have passed. Nothing here makes a release public: the owner clicks Publish on the draft.
+  publish:
+    name: Merge the manifest and verify the draft
+    needs: [source, mac-arm64, win, windows-install]
+    if: ${{ !cancelled() && needs.source.result == 'success' && needs.mac-arm64.result == 'success' && needs.win.result == 'success' && needs.windows-install.result == 'success' }}
+    runs-on: ubuntu-latest
+    environment: release-signing
+    env:
+      RELEASE_REF_TYPE: ${{ needs.source.outputs.ref_type }}
+      RELEASE_REF_NAME: ${{ inputs.tag }}
+      LOG_RECIPIENT: ${{ vars.TEST_LOG_RECIPIENT }}
+    steps:
+      - name: Create a read-only App token for the private repositories
+        id: app
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.BUILDER_APP_ID }}
+          private-key: ${{ secrets.BUILDER_APP_PRIVATE_KEY }}
+          owner: AIOSCompanion
+          repositories: aios-desktop-app
+          permission-contents: read
+
+      - name: Check out the private desktop repository at the pinned commit
+        uses: actions/checkout@v4
+        with:
+          repository: AIOSCompanion/aios-desktop-app
+          ref: ${{ needs.source.outputs.src_sha }}
+          token: ${{ steps.app.outputs.token }}
+          persist-credentials: false
+
+      - name: Check out the public builder (scripts that seal the logs)
+        uses: actions/checkout@v4
+        with:
+          repository: AIOSCompanion/companion-builder
+          path: builder
+          persist-credentials: false
+
+      # Trusted scripts are copied outside the workspace, hashed and made read-only before any other code runs.
+      - name: Snapshot the trusted scripts outside the workspace
+        run: python3 -I -B builder/scripts/snapshot_trusted.py snapshot --dest "$RUNNER_TEMP/trusted"
+
+      - name: Import the team's public log key (a variable, not a secret)
+        env:
+          TEST_LOG_PUBLIC_KEY: ${{ vars.TEST_LOG_PUBLIC_KEY }}
+        run: printf '%s\n' "$TEST_LOG_PUBLIC_KEY" | gpg --batch --import >/dev/null 2>&1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install the metadata helper's dependency
+        run: python3 -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "install metadata helper dependency" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" -- python3 -m pip install --quiet 'PyYAML==6.0.2'
+
+      - name: Download the arm64 manifest
+        uses: actions/download-artifact@v4
+        with:
+          name: latest-mac-arm64
+          path: mac-yml
+
+      - name: Merge the arm64 latest-mac.yml (arm64 only; no Intel row in this run)
+        run: python3 -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "merge arm64 manifest" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" -- python3 -B scripts/release_metadata.py merge --arm64-only
+
+      - name: Re-upload the merged latest-mac.yml to the draft
+        env:
+          GH_TOKEN: ${{ secrets.PUBLISH_RELEASES_TOKEN }}
+        run: python3 -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "upload merged manifest" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" -- python3 -B scripts/release_metadata.py upload --arm64-only --asset latest-mac.yml
+
+      - name: Download the merged latest-mac.yml from the draft for verification
+        env:
+          GH_TOKEN: ${{ secrets.PUBLISH_RELEASES_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: python3 -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "download manifest for verification" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" -- gh release download "$TAG" --repo AIOSCompanion/aios-companion-releases --pattern latest-mac.yml -O /tmp/latest-mac-verify.yml
+
+      - name: Verify the merged latest-mac.yml on the draft
+        run: python3 -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "verify merged manifest" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" -- python3 -B scripts/release_metadata.py verify --arm64-only --manifest /tmp/latest-mac-verify.yml
+
+      - name: Verify the Windows manifest and installer are on the draft
+        env:
+          GH_TOKEN: ${{ secrets.PUBLISH_RELEASES_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: python3 -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "verify windows draft" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" -- python3 -B scripts/release_metadata.py verify-windows
+
+      - name: Verify the trusted scripts before upload
+        if: always()
+        run: python3 -I -B "$RUNNER_TEMP/trusted/snapshot_trusted.py" verify --dest "$RUNNER_TEMP/trusted"
+
+      - name: Upload the sealed publish logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sealed-publish
+          path: sealed/**/*.gpg
+          retention-days: 1
+          if-no-files-found: warn

@@ -1,0 +1,93 @@
+# Setup: the public builder
+
+Plain steps, in order. Nothing here asks you to paste a secret into chat. Where a step says "paste", paste into the GitHub page only. Values marked **secret** go in the secret box. Values marked **variable** go in the variable box and are not secret.
+
+Estimated time: about 30 minutes.
+
+## 0. Create the public repository (only if the automation cannot)
+
+The automation's token may not be allowed to create an organisation repository. If so, do this yourself:
+
+1. Open https://github.com/organizations/AIOSCompanion/repositories/new
+2. Repository name: `companion-builder`
+3. Choose **Public**.
+4. Tick **Add a README file**.
+5. Click **Create repository**.
+
+The automation will push the build scripts into it once review is done. It holds build scripts and workflows only. The Companion code stays in the private repositories.
+
+## 1. Create the GitHub App (read the contents of four repos)
+
+1. Open https://github.com/organizations/AIOSCompanion/settings/apps (the organisation's **Developer settings**, then **GitHub Apps**).
+2. Click **New GitHub App**.
+3. **GitHub App name**: `companion-builder-reader`
+4. **Homepage URL**: `https://github.com/AIOSCompanion/companion-builder`
+5. Turn **Webhook** off (untick **Active**).
+6. Under **Repository permissions**, set:
+   - **Contents**: **Read-only**
+   - **Commit statuses**: **Read and write**
+   Set nothing else.
+7. Under **Where can this GitHub App be installed?**, choose **Only on this account**.
+8. Click **Create GitHub App**.
+9. On the app's page, note the **App ID** (a number). Put it in the public repo as a **variable**: go to `companion-builder` → **Settings** → **Secrets and variables** → **Actions** → **Variables** tab → **New repository variable**. Name: `BUILDER_APP_ID`. Value: the number.
+10. On the app's page, scroll to **Private keys** and click **Generate a private key**. A `.pem` file downloads.
+11. Back in `companion-builder` → **Settings** → **Secrets and variables** → **Actions** → **Secrets** tab → **New repository secret**. Name: `BUILDER_APP_PRIVATE_KEY`. In the value box, paste the whole contents of the `.pem` file (open it in Notepad, select all, copy, paste). Then delete the `.pem` file from your Downloads folder.
+12. On the app's page, click **Install App** (left side), then **Install** next to AIOSCompanion.
+13. Choose **Only select repositories** and pick exactly these four: `aios-desktop-app`, `aiosxaegra`, `companion-memory`, `aios-companion-releases`. The last one lets the App read the published runtime and manifest assets, so the write token is not needed for reads. Click **Install**.
+
+Check: the app should not be installed on any other repository.
+
+## 2. The test-log key (the public log is encrypted to this key)
+
+The full test output is encrypted to a key only the team holds. Only the public half goes in the repo; the private half stays with you.
+
+1. Create a key on your computer with `gpg --full-generate-key` (RSA 4096, no expiry, name `companion-builder test logs`, email `companion-builder@invalid`). Use a strong passphrase and keep it in your password manager.
+2. Export the public key: `gpg --armor --export "companion-builder test logs" > test-log-public.asc`.
+3. In `companion-builder`, add two **variables** (not secrets):
+   - `TEST_LOG_RECIPIENT`: the text `companion-builder test logs`.
+   - `TEST_LOG_PUBLIC_KEY`: open `test-log-public.asc` in Notepad and paste its whole contents.
+4. Keep the private key and passphrase to yourself. Anyone with it can read the test logs.
+
+## 3. The release-signing environment (macOS signing)
+
+Signing secrets never sit at repository level. They sit in an environment that needs your approval before any job can read them.
+
+1. In `companion-builder`, go to **Settings** → **Environments** → **New environment**. Name: `release-signing`. Click **Configure environment**.
+2. Tick **Required reviewers**, add yourself (`Al-aminI`), and save.
+3. Under **Deployment branches and tags**, choose **Selected branches and tags**, and add a tag rule: `v*`.
+4. Under **Environment secrets**, click **Add secret** for each of these, pasting the value from the place it already lives (your Apple developer account or the `aios-desktop-app` repository secrets):
+   - `APPLE_API_KEY`: the App Store Connect API key file contents (the `.p8` text).
+   - `APPLE_API_KEY_ID`: the key ID.
+   - `APPLE_API_ISSUER`: the issuer ID.
+   - `CSC_LINK`: the Developer ID certificate, base64.
+   - `CSC_KEY_PASSWORD`: the certificate password.
+   - `DOTENV_PRODUCTION_B64`: the build-time settings file, base64. It is baked into the app at build time and never printed. Copy it from the `aios-desktop-app` repository secret of the same name.
+   - `SENTRY_AUTH_TOKEN`: lets the build upload source maps to Sentry. Copy it from the `aios-desktop-app` secret of the same name.
+   - `CLOUDFLARE_AUTH_TOKEN`: the Workers AI token the app uses for memory embeddings. Copy it from the `aios-desktop-app` secret of the same name.
+   - `CLOUDFLARE_ACCOUNT_ID`: the Cloudflare account the Workers AI token belongs to. Copy it from the `aios-desktop-app` secret of the same name.
+5. Do not add `APPLE_ID` or `APPLE_APP_SPECIFIC_PASSWORD`. The Apple ID route is removed on purpose.
+
+The three `APPLE_API_*` names are already set on `aios-desktop-app`. The automation cannot read their values, so they must be copied here by you.
+
+## 4. The publish credential (writes release assets)
+
+Writing to `aios-companion-releases` (creating the draft, uploading assets, the build's publish step) needs a write token on that repository only. The App reads; this token writes. It also reads drafts, because GitHub shows a draft only to a token with write access.
+
+1. Open https://github.com/settings/personal-access-tokens/new (a fine-grained token on your account).
+2. **Token name**: `companion-builder publish`. **Expiration**: 90 days (set a reminder to rotate).
+3. **Resource owner**: AIOSCompanion.
+4. **Repository access**: **Only select repositories** → `aios-companion-releases` only.
+5. Under **Repository permissions**: **Contents**: **Read and write**. Nothing else.
+6. Click **Generate token** and copy it once.
+7. In `companion-builder` → **Settings** → **Environments** → `release-signing` → **Add secret**. Name: `PUBLISH_RELEASES_TOKEN`. Paste the token.
+
+When the token expires, make a new one the same way and replace the secret.
+
+## 5. Check before the first test run
+
+Tell the maintainer when steps 1 to 4 are done. It will then run one test on a throwaway tag. That run is free. Please do not add any other secrets to the public repository.
+
+## What the automation will not do
+
+- They will not create the App, the signing environment, the test-log key or the publish token for you.
+- They will not ask you to paste a secret into chat. If a message asks you to, do not paste.
