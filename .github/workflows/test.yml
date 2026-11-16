@@ -124,15 +124,27 @@ jobs:
           DEPENDENCY_REPOSITORY: aiosxaegra
         run: python3 -I -B "$RUNNER_TEMP/trusted/resolve_memory_dependency.py"
 
-      - name: Check out the pinned engine peer (registry only for desktop source tests)
-        if: matrix.repo != 'aiosxaegra'
+      - name: Check out the pinned engine peer for the memory runtime
+        if: matrix.repo == 'companion-memory'
         uses: actions/checkout@v4
         with:
           repository: AIOSCompanion/aiosxaegra
           ref: ${{ steps.engine-peer.outputs.sha }}
           token: ${{ steps.checkout-token.outputs.token }}
           path: aiosxaegra
-          sparse-checkout: ${{ matrix.repo == 'aios-desktop-app' && 'graphs/react_agent/models_registry.json' || '' }}
+          persist-credentials: false
+
+      - name: Check out the pinned engine source contracts for desktop tests
+        if: matrix.repo == 'aios-desktop-app'
+        uses: actions/checkout@v4
+        with:
+          repository: AIOSCompanion/aiosxaegra
+          ref: ${{ steps.engine-peer.outputs.sha }}
+          token: ${{ steps.checkout-token.outputs.token }}
+          path: aiosxaegra
+          sparse-checkout: |
+            graphs
+            src
           sparse-checkout-cone-mode: false
           persist-credentials: false
 

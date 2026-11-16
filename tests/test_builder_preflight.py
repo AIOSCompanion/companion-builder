@@ -164,8 +164,10 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(suites[0]["setup"], "CFLAGS='-include string.h -D_DEFAULT_SOURCE' npm ci --no-audit --no-fund")
         workflow = yaml.safe_load((ROOT / ".github/workflows/test.yml").read_text())
         steps = workflow["jobs"]["suite"]["steps"]
-        peer = next(step for step in steps if step.get("with", {}).get("path") == "aiosxaegra")
-        self.assertIn("graphs/react_agent/models_registry.json", peer["with"]["sparse-checkout"])
+        peer = next(step for step in steps if step.get('name') == 'Check out the pinned engine source contracts for desktop tests')
+        self.assertEqual(peer['if'], "matrix.repo == 'aios-desktop-app'")
+        self.assertEqual(peer['with']['sparse-checkout'].split(), ['graphs', 'src'])
+        self.assertFalse(peer['with']['sparse-checkout-cone-mode'])
         self.assertFalse(peer["with"]["persist-credentials"])
         native = next(step for step in steps if step.get("name") == "Install the desktop native build headers")
         self.assertEqual(native["if"], "matrix.suite == 'desktop unit tests (vitest)'")
