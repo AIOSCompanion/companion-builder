@@ -159,6 +159,15 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("--editable '.[dev]'", memory_setup)
         self.assertIn("ln -s ../aiosxaegra/.venv .venv", memory_setup)
 
+    def test_desktop_runtime_tests_do_not_skip_the_canonical_native_install(self):
+        suites = plan.SUITES["aios-desktop-app"]
+        self.assertEqual(suites[0]["setup"], "npm ci --no-audit --no-fund")
+        workflow = yaml.safe_load((ROOT / ".github/workflows/test.yml").read_text())
+        steps = workflow["jobs"]["suite"]["steps"]
+        peer = next(step for step in steps if step.get("with", {}).get("path") == "aiosxaegra")
+        self.assertIn("graphs/react_agent/models_registry.json", peer["with"]["sparse-checkout"])
+        self.assertFalse(peer["with"]["persist-credentials"])
+
     def test_public_self_check_has_no_secrets_private_checkout_or_release(self):
         text = (ROOT / ".github/workflows/self-check.yml").read_text()
         self.assertNotIn("secrets.", text)

@@ -40,6 +40,7 @@ python scripts/builder.py doctor --mode test
 python scripts/builder.py test aiosxaegra <full-40-character-commit-sha>
 python scripts/builder.py test aiosxaegra <engine-sha> --memory-sha <memory-sha>
 python scripts/builder.py test companion-memory <memory-sha> --engine-sha <engine-sha>
+python scripts/builder.py test aios-desktop-app <desktop-sha> --engine-sha <engine-sha>
 python scripts/builder.py doctor --mode release
 python scripts/builder.py release v1.2.3
 python scripts/builder.py self-check
@@ -56,6 +57,11 @@ also need their historical release commits and the engine sibling. Both suites u
 runtime, with memory installed against those constraints, matching the shared in-process host; memory's
 standalone lock can pin a different native database version. Tests never resolve packages inside the
 network-isolated suite.
+
+Desktop runtime tests run the app's normal dependency installation, including Electron/native modules
+and its canonical archive preparation. The separate typecheck lane avoids those scripts. Desktop tests
+also receive only the pinned engine registry file needed by model contracts; full cross-repository
+live-wire acceptance remains a separate lane requiring its complete runtime.
 
 - `self-check.yml`: tests this public builder only, with no private-source credentials or signing material.
 - `bridge/`: authenticated GitHub App event receiver for private pushes, same-repo PR heads
