@@ -34,7 +34,8 @@ LO_ONLY = "1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536\n"
 
 class PlanTests(unittest.TestCase):
     def test_each_repository_gets_its_fixed_suites(self):
-        self.assertIn("pytest tests/unit", plan_suites.matrix_for("aiosxaegra"))
+        self.assertEqual(len(plan_suites.SUITES['aiosxaegra']), 8)
+        self.assertTrue(all('tests/unit' in suite['run'] for suite in plan_suites.SUITES['aiosxaegra']))
         self.assertEqual(plan_suites.matrix_for("aios-desktop-app").count('"suite"'), 2)
 
     def test_python_suites_install_uv_for_the_test_user_only(self):

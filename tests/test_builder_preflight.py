@@ -151,9 +151,9 @@ class BuilderTests(unittest.TestCase):
 
     def test_python_suites_use_the_environment_installed_during_setup_without_resolution(self):
         for repository in ("aiosxaegra", "companion-memory"):
-            suite, = plan.SUITES[repository]
-            self.assertTrue(suite["run"].startswith(".venv/bin/python -m pytest"))
-            self.assertNotIn("uv run", suite["run"])
+            for suite in plan.SUITES[repository]:
+                self.assertTrue(suite["run"].startswith(".venv/bin/python "))
+                self.assertNotIn("uv run", suite["run"])
         memory_setup = plan.SUITES["companion-memory"][0]["setup"]
         self.assertIn("uv sync --project ../aiosxaegra --locked", memory_setup)
         self.assertIn("--editable '.[dev]'", memory_setup)
