@@ -25,3 +25,45 @@ jobs:
         run: python -m pip install --disable-pip-version-check PyYAML==6.0.2
       - name: Test the builder and validate workflow contracts
         run: python -m unittest discover -s tests -v
+
+  isolation:
+    name: Prove hosted Linux isolation with public synthetic data
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Create the disposable test checkout
+        run: mkdir smoke-checkout
+      - name: Prepare the test user
+        run: python -I -B scripts/prepare_untrusted.py --checkout smoke-checkout --home "$HOME"
+      - name: Snapshot trusted scripts
+        run: python -I -B scripts/snapshot_trusted.py snapshot --dest "$RUNNER_TEMP/trusted"
+      - name: Prove network isolation with calibration
+        run: python -I -B "$RUNNER_TEMP/trusted/egress_probe.py"
+      - name: Prove write isolation and report runner-file permissions
+        run: python -I -B "$RUNNER_TEMP/trusted/permission_probe.py" --trusted "$RUNNER_TEMP/trusted" --workdir smoke-checkout --workspace "$GITHUB_WORKSPACE" --path "$PATH" --home "$HOME"
+      - name: Verify snapshot integrity
+        run: python -I -B "$RUNNER_TEMP/trusted/snapshot_trusted.py" verify --dest "$RUNNER_TEMP/trusted"
+
+  sealed-output:
+    name: Sealed output on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify real encryption without private data or persistent keys
+        run: python scripts/gpg_smoke.py
