@@ -1,101 +1,80 @@
 # Private events to the public builder
 
-This Worker receives signed repository webhooks. Builds and tests execute only in
-`AIOSCompanion/companion-builder` on hosted GitHub runners. The Worker does not build
-anything or check out product source.
+This portable Node receiver runs on an existing Linux host. It receives signed
+webhooks and dispatches GitHub workflows; all builds and tests execute in
+`AIOSCompanion/companion-builder` on hosted GitHub runners. It never checks out
+product code. The receiver has no npm dependencies and requires Node >=22.13.
 
-## Routing
+## Routing and persistence
 
-- A branch push, including `main`, dispatches `test.yml` for **each** commit in the
-  push and its head. It does not collapse a multiple-commit push to its last commit.
-- Opening, reopening or updating a PR in the same private repository dispatches its
-  head. Fork PRs are excluded.
-- A newly created desktop `vX.Y.Z` tag dispatches `release.yml`. Its original tag
-  object SHA accompanies the request. The workflow validates that identity, peels
-  annotated tags and checks out the resulting immutable commit. Moved version tags
-  are refused.
-- Private-source tests/statuses and large-push expansion require `source-access`
-  owner approval. Release identity and signing require `release-signing` approval. The release
-  workflow produces and verifies a draft; it does not automatically publish it.
+- Every branch push, including main, dispatches each commit and the head to test.yml.
+- Same-repository PR opened/reopened/synchronize/ready events dispatch the head;
+  forks and closed PRs are excluded.
+- A newly created desktop version tag dispatches release.yml with its immutable
+  tag-object SHA. Moved tags are refused. Release validation peels annotated tags.
+- Pushes reaching the 2048-commit payload limit delegate expansion to catch-up.yml.
 
-The receiver authenticates the exact raw body using WebCrypto HMAC verification,
-checks the organization/repository allowlist and drops private metadata before
-storing a delivery. Durable Objects retain the minimal delivery and retry GitHub
-failures. Push payloads at GitHub's 2048-commit limit dispatch `catch-up.yml`, which
-reads private commit pages only after `source-access` approval. A new branch at that limit can run tests
-on older reachable history too, because it has no previous branch SHA.
+WebCrypto verifies the exact request body against the webhook HMAC. Only allowed
+organization/repository metadata and hashes are persisted; private commit messages
+and payloads are discarded. SQLite commits acceptance and its retry alarm in one
+transaction, with WAL and synchronous FULL. Successful dispatches are checkpointed
+individually. Restarting the service resumes accepted work and outages retry with
+bounded exponential backoff. The database survives code deployment.
 
-The same delivery ID is deduplicated. GitHub dispatch has no idempotency key: a
-connection loss after GitHub accepts a dispatch but before its response reaches the
-Worker can produce a duplicate run on retry. Repeated events (such as a branch push
-and its PR update) can also test the same SHA. Release workflow concurrency and the
-single-draft release logic still apply. No exactly-once execution claim is made.
+Delivery UUIDs are deduplicated. GitHub dispatch has no idempotency key: losing a
+response after acceptance can cause a duplicate workflow on retry. Push plus PR
+events can also repeat a SHA. No exactly-once claim is made.
 
-## Configuration
+## Credentials and host setup
 
-Existing Apple signing/notary credentials remain the originals already held in the
-private desktop repository; creating this bridge does not replace them. GitHub
-cannot copy or reveal saved secret values across repositories. They still need to
-be populated in the builder environment from the maintained originals.
+The existing reader App remains restricted to private source/release repositories;
+its key lives only in approved source-access/release-signing environments. Every
+private checkout and status job still requires owner approval. The bridge uses the
+existing separate dispatch App installed ONLY on companion-builder, with Actions
+write and no private source access. Deployment and startup both audit that scope.
+Do not create replacement Apps or signing keys.
 
-Use two distinct GitHub Apps. The private-source reader App has Contents read and
-Commit statuses write on the three source repositories and releases repository.
-Its `BUILDER_APP_PRIVATE_KEY` is held only in protected `source-access` and
-`release-signing` environments; no repository or organization copy may be available
-to this builder. Every job that mints its token requires approval.
+Use the existing protected bridge-deploy environment, main-only and owner-approved:
 
-The separate bridge dispatch App has Actions write and is installed **only on
-companion-builder**. Its private key cannot grant access to the private source
-repositories and must never be the reader App's key. Private repo Actions remain disabled.
+- Variables BRIDGE_APP_ID, BRIDGE_SSH_HOST, BRIDGE_SSH_USER.
+- Secrets BRIDGE_APP_PRIVATE_KEY, BRIDGE_WEBHOOK_SECRET, BRIDGE_STATUS_TOKEN.
+- Secrets BRIDGE_SSH_PRIVATE_KEY and BRIDGE_SSH_KNOWN_HOSTS for a verified existing
+  host. Pin its host key using a trusted source; never disable host checking.
 
-In each private repository's Settings → Webhooks, configure the deployed Worker's
-`/webhook` URL, a shared strong webhook secret and **Push** and **Pull request** events.
-Do not create an unsigned repository-dispatch endpoint or put a broad personal
-token into the Worker.
+The target needs /usr/bin/node >=22.13, Python3, systemd and a deployment SSH user
+with passwordless sudo for the trusted installer. Deployment creates a dedicated
+non-login service user and a hardened systemd unit. Public receiver files are
+versioned under /opt/companion-builder-bridge; credentials and SQLite live in
+/var/lib/companion-builder-bridge with private permissions. Prior code versions
+and the existing database are retained. Keys travel via stdin, never argv or logs.
 
-Create a protected `bridge-deploy` GitHub environment with Alamin as reviewer and
-the builder `main` branch allowed. Configuration used by `bridge-deploy.yml`:
+The service listens ONLY on 127.0.0.1:8123. Configure the host's existing TLS proxy
+with a dedicated HTTPS route, a 25MB request limit and body timeout. No new hosting
+plan is purchased by this code. The deploy workflow does not modify production
+proxy routes, firewalls or certificates. Keep the bridge disabled until HTTPS is
+ready. Disabled mode refuses new deliveries and retains pending retry work.
 
-- Environment variable `BRIDGE_APP_ID` and secret `BRIDGE_APP_PRIVATE_KEY` for the
-  separate builder-only dispatch App. Do not use the source reader App here.
-- Environment variable `BRIDGE_CLOUDFLARE_ACCOUNT_ID`.
-- Environment secret `BRIDGE_CLOUDFLARE_API_TOKEN`, scoped to deploy this Worker and
-  its Durable Object namespace. Do not assume the existing embeddings token has
-  deployment permissions.
-- Environment secrets `BRIDGE_WEBHOOK_SECRET` and `BRIDGE_STATUS_TOKEN` (independent
-  random values). The former matches the GitHub App webhook secret; the latter
-  protects the delivery-status endpoint.
-
-Deploy through the **public builder's** `bridge-deploy.yml` workflow. It defaults
-to disabled. After owner setup and the agreed review, dispatch with `enable=true`.
-Deployment first disables acceptance, transfers Worker secrets through stdin and
-then enables it. The script suppresses provider error bodies and never prints keys.
-Disabling acceptance does not erase accepted deliveries; their retry alarms retain
-them until the bridge is enabled again.
-
-SQLite-backed Durable Objects are supported on Cloudflare's Free plan. Deployment
-must use the agreed account and plan; this implementation does not change billing
-plans or establish a spending cap. Deployment and hosted event acceptance are
-**unverified until actually performed**.
+Run only the public builder's bridge-deploy.yml from main. It defaults enable=false,
+stops the prior receiver before installing its complete configuration, then starts
+and checks local readiness. configure each private source repository webhook with
+the HTTPS /webhook endpoint, the shared webhook secret, and push/PR events.
 
 ## Acceptance gates
 
-1. `npm ci --ignore-scripts && npm test` in `bridge/` and the builder self-check pass.
-   The runtime test uses real workerd, SQLite storage and a real durable alarm;
-   its GitHub API is synthetic and cannot access private repositories.
-2. Deploy disabled, configure the App webhook and verify its signed ping after
-   enabling acceptance.
-3. Push a two-commit throwaway branch to a private source repo: both SHAs get real
-   builder test runs and private commit statuses after source-access approval;
-   inspect decrypted logs locally.
-4. Open/update its same-repo PR and merge an approved change to main: verify the
-   respective heads get test runs, with no private Actions run.
-5. Create a reviewed test version tag matching the package version; approve the
-   signing environment. Verify macOS signing/notarisation, Windows installer checks,
-   encrypted-only logs and the final draft manifest/assets.
-6. Query `/delivery/<GitHub-delivery-UUID>` with the status bearer token to confirm
-   `complete=true`; a nonzero retry count means investigate the delivery before
-   treating automation as healthy. Keep monitoring delivery failures in GitHub.
+1. Builder self-check and `npm test` pass. Runtime tests use actual loopback HTTP
+   and SQLite, with restart recovery, partial-failure retry and duplicate delivery;
+   GitHub calls are synthetic and cannot reach private repositories.
+2. Deploy disabled to the verified existing host, configure TLS, enable, and verify
+   a real signed GitHub ping. No deployment or event routing is proven by unit tests.
+3. A two-commit private branch push creates both real public-builder test runs;
+   approve source-access, verify statuses and decrypt logs locally.
+4. A same-repo PR update and approved main merge create the expected runs, with
+   private Actions still disabled.
+5. A reviewed version tag produces a signed/notarized macOS build, verified Windows
+   assets and final draft manifest after release-signing approval. Existing Apple
+   credential originals must be supplied; GitHub cannot reveal saved secret values.
+6. The bearer-protected /delivery/<UUID> status reports complete=true; monitor
+   retries and GitHub webhook delivery failures. No public payload logging.
 
-Unit/mocked integration checks cannot substitute for gates 2–6. A green builder
-self-check does not establish a working private-source or release integration.
+Hosted deployment, automatic event routing and product release remain unverified
+until those gates are actually exercised. A builder self-check is not release proof.

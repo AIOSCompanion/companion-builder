@@ -30,12 +30,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Test event routing and delivery before deploying
-        run: node --test bridge/worker.test.mjs
+      - name: Test signed routing, durable storage and restart recovery before deploying
+        run: node --test bridge/worker.test.mjs bridge/portable.test.mjs
       - name: Deploy the bridge without printing credentials or payloads
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.BRIDGE_CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ vars.BRIDGE_CLOUDFLARE_ACCOUNT_ID }}
+          BRIDGE_SSH_HOST: ${{ vars.BRIDGE_SSH_HOST }}
+          BRIDGE_SSH_USER: ${{ vars.BRIDGE_SSH_USER }}
+          BRIDGE_SSH_PRIVATE_KEY: ${{ secrets.BRIDGE_SSH_PRIVATE_KEY }}
+          BRIDGE_SSH_KNOWN_HOSTS: ${{ secrets.BRIDGE_SSH_KNOWN_HOSTS }}
           BRIDGE_APP_ID: ${{ vars.BRIDGE_APP_ID }}
           BRIDGE_APP_PRIVATE_KEY: ${{ secrets.BRIDGE_APP_PRIVATE_KEY }}
           BRIDGE_WEBHOOK_SECRET: ${{ secrets.BRIDGE_WEBHOOK_SECRET }}
