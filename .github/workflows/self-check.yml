@@ -3,7 +3,7 @@ name: Builder self-check
 # Public builder code only. No private checkout, signing secret, or product release.
 on:
   push:
-    branches: [main, alamin-builder-ready]
+    branches: [main]
   pull_request:
   workflow_dispatch:
 

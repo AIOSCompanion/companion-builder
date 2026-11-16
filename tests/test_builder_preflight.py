@@ -23,9 +23,17 @@ pins = load("read_release_pins")
 plan = load("plan_suites")
 configure = load("configure")
 runtime = load("protect_runtime")
+sealed = load("run_sealed")
 
 
 class BuilderTests(unittest.TestCase):
+    def test_msys_gpg_paths_use_drive_mounts_without_changing_native_gpg_paths(self):
+        msys = ("C:/Program Files/Git/usr/bin/gpg.exe",)
+        self.assertEqual(sealed.gpg_filename(msys, "D:/a/_temp/log.gpg", windows=True), "/d/a/_temp/log.gpg")
+        self.assertEqual(sealed.gpg_filename(msys, "sealed/log.gpg", windows=True), "sealed/log.gpg")
+        native = ("C:/Program Files/GnuPG/bin/gpg.exe",)
+        self.assertEqual(sealed.gpg_filename(native, "D:/a/_temp/log.gpg", windows=True), "D:/a/_temp/log.gpg")
+
     def test_runtime_protection_rejects_a_checkout_and_protects_tools_and_parent_replacement(self):
         with tempfile.TemporaryDirectory() as temp:
             workspace = Path(temp) / "checkout"

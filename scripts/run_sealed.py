@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import argparse
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import re
 import shutil
 import subprocess
@@ -76,11 +76,23 @@ def safe_slug(name):
     return slug
 
 
+def gpg_filename(gpg, path, *, windows=None):
+    """Git for Windows ships an MSYS gpg, whose file API needs /c/... rather than C:/...."""
+    windows = os.name == "nt" if windows is None else windows
+    executable = (shutil.which(gpg[0]) or gpg[0]).replace("\\", "/").lower()
+    if windows and "/git/usr/bin/" in executable:
+        value = PureWindowsPath(path)
+        if value.drive and len(value.drive) == 2 and value.drive[1] == ":":
+            return "/" + value.drive[0].lower() + value.as_posix()[2:]
+        return value.as_posix()
+    return str(path)
+
+
 def encrypt_stream_pipe(gpg, recipient, target):
     """Start gpg reading plaintext from stdin and writing ciphertext to target."""
     target.parent.mkdir(parents=True, exist_ok=True)
     return subprocess.Popen([*gpg, "--batch", "--yes", "--trust-model", "always", "--encrypt",
-                             "-r", recipient, "-o", str(target)],
+                             "-r", recipient, "-o", gpg_filename(gpg, target)],
                             stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
@@ -88,7 +100,7 @@ def seal_path(gpg, recipient, source, target):
     """Encrypt one file to target, then remove the plaintext only if the ciphertext exists."""
     target.parent.mkdir(parents=True, exist_ok=True)
     result = subprocess.run([*gpg, "--batch", "--yes", "--trust-model", "always", "--encrypt",
-                             "-r", recipient, "-o", str(target), str(source)],
+                             "-r", recipient, "-o", gpg_filename(gpg, target), gpg_filename(gpg, source)],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
     if result.returncode != 0 or not target.is_file() or target.stat().st_size == 0:
         return False
