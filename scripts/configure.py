@@ -27,6 +27,11 @@ def set_value(kind, name, value, *, environment=None, run=subprocess.run):
         raise RuntimeError(f"could not configure {kind} {name}; no value was printed")
 
 
+def set_app_key(value, *, run=subprocess.run):
+    for environment in ("source-access", "release-signing"):
+        set_value("secret", "BUILDER_APP_PRIVATE_KEY", value, environment=environment, run=run)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--app-id", required=True, type=int)
@@ -52,7 +57,7 @@ def main(argv=None):
         set_value("variable", "BUILDER_APP_ID", str(args.app_id))
         set_value("variable", "TEST_LOG_PUBLIC_KEY", public_key)
         set_value("variable", "TEST_LOG_RECIPIENT", args.log_recipient)
-        set_value("secret", "BUILDER_APP_PRIVATE_KEY", app_key)
+        set_app_key(app_key)
         for name, value in release.items():
             set_value("secret", name, value, environment="release-signing")
         print("Builder configuration uploaded. Run builder.py doctor to check remaining names; no values were printed.")

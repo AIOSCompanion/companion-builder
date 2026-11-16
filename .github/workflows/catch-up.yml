@@ -1,0 +1,52 @@
+name: Expand a large private push after owner approval
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        type: choice
+        options: [aios-desktop-app, aiosxaegra, companion-memory]
+        required: true
+      before_sha:
+        type: string
+        required: true
+      head_sha:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: catch-up-${{ inputs.repository }}-${{ inputs.before_sha }}-${{ inputs.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  expand:
+    runs-on: ubuntu-latest
+    environment: source-access
+    timeout-minutes: 30
+    steps:
+      - name: Require the trusted builder main branch
+        run: test "$GITHUB_REF" = "refs/heads/main"
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Create a read-only source token after approval
+        id: source
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510
+        with:
+          app-id: ${{ vars.BUILDER_APP_ID }}
+          private-key: ${{ secrets.BUILDER_APP_PRIVATE_KEY }}
+          owner: AIOSCompanion
+          repositories: ${{ inputs.repository }}
+          permission-contents: read
+      - name: Paginate private commit hashes and dispatch public tests
+        env:
+          SOURCE_TOKEN: ${{ steps.source.outputs.token }}
+          DISPATCH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ inputs.repository }}
+          BEFORE_SHA: ${{ inputs.before_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+        run: python3 -I -B scripts/catch_up.py

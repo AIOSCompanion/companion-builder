@@ -152,22 +152,22 @@ test("alarm dispatches every commit and resumes after GitHub failure without los
   assert.deepEqual(dispatched, [a, b]);
 });
 
-test("large pushes checkpoint pagination and dispatch hashes beyond the webhook's truncated list", async t => {
+test("large pushes delegate private history expansion to an approved builder job", async t => {
   const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
   const storage = new Storage();
   const env = { BRIDGE_ENABLED: "true", BRIDGE_APP_ID: "12345",
     BRIDGE_APP_PRIVATE_KEY: privateKey.export({ type: "pkcs8", format: "pem" }) };
   const object = new Delivery({ storage }, env);
-  const extra = "c".repeat(40), seen = [];
+  const seen = [];
   t.mock.method(globalThis, "fetch", async (url, options) => {
-    if (url.endsWith("/installation")) return Response.json({ id: 987 });
-    if (url.endsWith("/access_tokens")) return Response.json({ token: "synthetic-token" });
-    if (url.includes("/compare/")) {
-      assert.ok(url.endsWith("per_page=100&page=2"));
-      return Response.json({ commits: [{ sha: extra }] });
+    if (url.endsWith("/installation")) {
+      assert.ok(url.includes("/companion-builder/"));
+      return Response.json({ id: 987 });
     }
+    if (url.endsWith("/access_tokens")) return Response.json({ token: "synthetic-token" });
     if (url.endsWith("/dispatches")) {
-      seen.push(JSON.parse(options.body).inputs.head_sha);
+      assert.ok(url.endsWith("/catch-up.yml/dispatches"));
+      seen.push(JSON.parse(options.body));
       return new Response(null, { status: 204 });
     }
     throw new Error("unexpected request");
@@ -175,9 +175,8 @@ test("large pushes checkpoint pagination and dispatch hashes beyond the webhook'
   await storage.put("state", { repo: repository.name, commits: [a, b], before: a, after: b,
     expand: true, page: 2, index: 0 });
   await object.alarm();
-  assert.equal((await storage.get("state")).page, 3);
-  assert.equal((await storage.get("state")).expand, false);
-  await object.alarm();
-  assert.deepEqual(seen.sort(), [a, b, extra]);
+  assert.deepEqual(seen, [{ ref: "main", inputs: { repository: repository.name, before_sha: a, head_sha: b } }]);
   assert.equal((await storage.get("state")).done, true);
+  await object.alarm();
+  assert.equal(seen.length, 1);
 });

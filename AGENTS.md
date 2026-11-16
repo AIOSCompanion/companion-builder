@@ -13,3 +13,7 @@ Use this repository for Companion GitHub CI and release builds. Product source s
 - Releases dispatch from the builder's main branch. The source version tag is an input; the signing environment allows main and retains its owner approval.
 - No Linux package is shipped by this builder. Hosted Ubuntu is used for tests and orchestration.
 - A green self-check proves builder tests only; it does not prove private checkout, signing, installer validation or a product release. Report those gates separately.
+- Keep the private-source App key only in owner-approved `source-access` and
+  `release-signing` environments. Every job that reads it must use one of those.
+  The live bridge uses a separate App installed only on the public builder;
+  never deploy the private-source reader key into that service.

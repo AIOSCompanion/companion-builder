@@ -28,20 +28,23 @@ def api(path, run=subprocess.run):
 def missing_configuration(mode, variables, secrets, environment=None, policies=(), environment_secrets=()):
     missing = [f"variable:{key}" for key in ("BUILDER_APP_ID", "TEST_LOG_PUBLIC_KEY", "TEST_LOG_RECIPIENT")
                if key not in variables]
-    if "BUILDER_APP_PRIVATE_KEY" not in secrets:
-        missing.append("secret:BUILDER_APP_PRIVATE_KEY")
+    if "BUILDER_APP_PRIVATE_KEY" in secrets:
+        missing.append("unsafe-repository-secret:BUILDER_APP_PRIVATE_KEY")
+    name = "release-signing" if mode == "release" else "source-access"
+    if environment is None:
+        missing.append(f"environment:{name}")
+    else:
+        if not any(rule.get("type") == "required_reviewers" and rule.get("reviewers")
+                   for rule in environment.get("protection_rules", [])):
+            missing.append("environment:required-reviewer")
+        policy = environment.get("deployment_branch_policy") or {}
+        if not policy.get("custom_branch_policies") or policy.get("protected_branches"):
+            missing.append("environment:main-only-policy")
+        if list(policies) != [{"name": "main", "type": "branch"}]:
+            missing.append("environment:main-only-branch-rule")
+    if "BUILDER_APP_PRIVATE_KEY" not in environment_secrets:
+        missing.append(f"environment-secret:{name}/BUILDER_APP_PRIVATE_KEY")
     if mode == "release":
-        if environment is None:
-            missing.append("environment:release-signing")
-        else:
-            if not any(rule.get("type") == "required_reviewers" and rule.get("reviewers")
-                       for rule in environment.get("protection_rules", [])):
-                missing.append("environment:required-reviewer")
-            policy = environment.get("deployment_branch_policy") or {}
-            if not policy.get("custom_branch_policies") or policy.get("protected_branches"):
-                missing.append("environment:main-only-policy")
-            if list(policies) != [{"name": "main", "type": "branch"}]:
-                missing.append("environment:main-only-branch-rule")
         missing.extend(f"environment-secret:{name}" for name in sorted(RELEASE_SECRETS - set(environment_secrets)))
     return missing
 
@@ -52,14 +55,14 @@ def doctor(mode, get=api):
     secrets = {s["name"] for s in get(root + "/actions/secrets?per_page=100")["secrets"]}
     environment = None
     policies, env_secrets = [], []
-    if mode == "release":
-        environments = get(root + "/environments")["environments"]
-        environment = next((e for e in environments if e["name"] == "release-signing"), None)
-        if environment is not None:
-            environment = get(root + "/environments/release-signing")
-            policies = [{"name": p["name"], "type": p["type"]} for p in
-                        get(root + "/environments/release-signing/deployment-branch-policies")["branch_policies"]]
-            env_secrets = [s["name"] for s in get(root + "/environments/release-signing/secrets?per_page=100")["secrets"]]
+    name = "release-signing" if mode == "release" else "source-access"
+    environments = get(root + "/environments")["environments"]
+    environment = next((e for e in environments if e["name"] == name), None)
+    if environment is not None:
+        environment = get(root + f"/environments/{name}")
+        policies = [{"name": p["name"], "type": p["type"]} for p in
+                    get(root + f"/environments/{name}/deployment-branch-policies")["branch_policies"]]
+        env_secrets = [s["name"] for s in get(root + f"/environments/{name}/secrets?per_page=100")["secrets"]]
     return missing_configuration(mode, variables, secrets, environment, policies, env_secrets)
 
 

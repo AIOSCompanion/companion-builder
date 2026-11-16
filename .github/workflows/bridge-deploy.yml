@@ -36,8 +36,8 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.BRIDGE_CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.BRIDGE_CLOUDFLARE_ACCOUNT_ID }}
-          BRIDGE_APP_ID: ${{ vars.BUILDER_APP_ID }}
-          BRIDGE_APP_PRIVATE_KEY: ${{ secrets.BUILDER_APP_PRIVATE_KEY }}
+          BRIDGE_APP_ID: ${{ vars.BRIDGE_APP_ID }}
+          BRIDGE_APP_PRIVATE_KEY: ${{ secrets.BRIDGE_APP_PRIVATE_KEY }}
           BRIDGE_WEBHOOK_SECRET: ${{ secrets.BRIDGE_WEBHOOK_SECRET }}
           BRIDGE_STATUS_TOKEN: ${{ secrets.BRIDGE_STATUS_TOKEN }}
           BRIDGE_ENABLED: ${{ inputs.enable }}

@@ -38,6 +38,7 @@ concurrency:
 jobs:
   identity:
     name: Validate release tag before private checkout
+    environment: release-signing
     runs-on: ubuntu-latest
     outputs:
       commit_sha: ${{ steps.identity.outputs.commit_sha }}

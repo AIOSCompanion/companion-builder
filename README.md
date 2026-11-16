@@ -58,6 +58,11 @@ workflow input. Sidecar pins are read from that selected private release, not co
 - `release.yml`: release builds for a tag on the private repository. Dispatch only, from this repository's
   default branch, into the `release-signing` environment, which needs an approval.
 - `test.yml`: PR tests for a PR head SHA on a private repository. Dispatch only. No `pull_request` trigger.
+- `catch-up.yml`: expands a truncated push into individual test dispatches, after
+  `source-access` owner approval. The external bridge cannot read private commit history.
+- All private-source App token jobs require `source-access` or `release-signing` approval.
+  The private-source App key is environment-only. The deployed bridge uses its own
+  builder-only dispatch App; it does not hold the reader App key.
 - Hosted runners only. No self-hosted runner.
 
 ## Residuals
