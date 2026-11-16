@@ -64,6 +64,9 @@ jobs:
         run: python -I -B "$RUNNER_TEMP/trusted/permission_probe.py" --trusted "$RUNNER_TEMP/trusted" --workdir smoke-checkout --workspace "$GITHUB_WORKSPACE" --path "$PATH" --home "$HOME" --require-runner-denials
       - name: Verify snapshot integrity
         run: python -I -B "$RUNNER_TEMP/trusted/snapshot_trusted.py" verify --dest "$RUNNER_TEMP/trusted"
+      - name: Verify detached test helpers are reaped before sealed output closes
+        working-directory: smoke-checkout
+        run: python -I -B "$RUNNER_TEMP/trusted/gpg_smoke.py" --suite-guard
 
   sealed-output:
     name: Sealed output on ${{ matrix.os }}

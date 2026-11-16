@@ -30,6 +30,11 @@ on:
         description: Optional full engine peer commit for memory tests or desktop registry contracts
         required: false
         type: string
+      diagnostic:
+        description: Limit the suite to ten minutes while preserving encrypted timeout diagnostics
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -69,7 +74,7 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.plan.outputs.matrix) }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 80
     env:
       LOG_RECIPIENT: ${{ vars.TEST_LOG_RECIPIENT }}
     steps:
@@ -183,7 +188,7 @@ jobs:
         env:
           SETUP_COMMAND: ${{ matrix.setup }}
           SEALED_LOG_DIR: ${{ runner.temp }}/sealed/logs
-        run: python3 -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "install dependencies" --log-dir "$SEALED_LOG_DIR" --recipient "$LOG_RECIPIENT" --as-user pr-tests -- bash -c "$SETUP_COMMAND"
+        run: python3 -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "install dependencies" --log-dir "$SEALED_LOG_DIR" --recipient "$LOG_RECIPIENT" --as-user pr-tests -- /usr/bin/timeout --signal=TERM --kill-after=30s 900s bash -c "$SETUP_COMMAND"
 
       # Calibration before the claim: the probe must reach github.com outside the namespace, and inside it only
       # loopback may exist and the connection must be refused (curl exit 6 or 7).
@@ -207,6 +212,7 @@ jobs:
           TEST_COMMAND: ${{ matrix.run }}
           SUITE_NAME: ${{ matrix.suite }}
           SEALED_LOG_DIR: ${{ runner.temp }}/sealed/logs
+          SUITE_TIMEOUT_SECONDS: ${{ inputs.diagnostic && '600' || '3300' }}
         run: python3 -I -B "$RUNNER_TEMP/trusted/run_suite.py"
 
       # The junit file was written by the PR's tests, so the workflow removes it (the wrapper sealed a copy).

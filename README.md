@@ -41,6 +41,7 @@ python scripts/builder.py test aiosxaegra <full-40-character-commit-sha>
 python scripts/builder.py test aiosxaegra <engine-sha> --memory-sha <memory-sha>
 python scripts/builder.py test companion-memory <memory-sha> --engine-sha <engine-sha>
 python scripts/builder.py test aios-desktop-app <desktop-sha> --engine-sha <engine-sha>
+python scripts/builder.py test aiosxaegra <engine-sha> --memory-sha <memory-sha> --diagnostic
 python scripts/builder.py doctor --mode release
 python scripts/builder.py release v1.2.3
 python scripts/builder.py self-check
@@ -62,6 +63,12 @@ Desktop runtime tests run the app's normal dependency installation, including El
 and its canonical archive preparation. The separate typecheck lane avoids those scripts. Desktop tests
 also receive only the pinned engine registry file needed by model contracts; full cross-repository
 live-wire acceptance remains a separate lane requiring its complete runtime.
+
+Suite deadlines run inside the encryption wrapper, so a timed-out test still produces a complete
+encrypted log. Installation is limited to 15 minutes; normal suites to 55 minutes, leaving cleanup
+time before the job limit. `--diagnostic` uses a ten-minute suite deadline. The dedicated test user's
+remaining helpers are reaped when its suite exits, including detached processes holding stdout open.
+Timeouts remain failures; diagnostic runs do not bypass the test or release gates.
 
 - `self-check.yml`: tests this public builder only, with no private-source credentials or signing material.
 - `bridge/`: authenticated GitHub App event receiver for private pushes, same-repo PR heads
