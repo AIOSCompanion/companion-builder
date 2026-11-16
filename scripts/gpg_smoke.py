@@ -22,15 +22,18 @@ def main():
         print("gpg smoke: gpg is unavailable")
         return 1
     old_home = os.environ.get("GNUPGHOME")
-    with tempfile.TemporaryDirectory(prefix="builder-public-smoke-") as temp:
+    # Short hosted paths avoid gpg-agent socket-length failures on macOS and Windows.
+    with tempfile.TemporaryDirectory(prefix="gpg-", dir=os.environ.get("RUNNER_TEMP")) as temp:
         home = Path(temp) / "keyring"
         home.mkdir(mode=0o700)
-        os.environ["GNUPGHOME"] = str(home)
+        os.environ["GNUPGHOME"] = home.as_posix()
         try:
             generated = subprocess.run([gpg, "--batch", "--pinentry-mode", "loopback", "--passphrase", "",
                                         "--quick-generate-key", "builder-public-self-check", "rsa2048", "encr", "1d"],
                                        capture_output=True, check=False)
             if generated.returncode:
+                # This process only generated a disposable synthetic key. No owner key/config is involved.
+                print(generated.stderr.decode("utf-8", errors="replace")[-1800:])
                 raise RuntimeError("disposable encryption key generation failed")
             summary = io.StringIO()
             logs = Path(temp) / "sealed"

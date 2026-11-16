@@ -3,6 +3,7 @@ from pathlib import Path
 import unittest
 import sys
 import subprocess
+import tempfile
 
 import yaml
 
@@ -21,9 +22,27 @@ builder = load("builder")
 pins = load("read_release_pins")
 plan = load("plan_suites")
 configure = load("configure")
+runtime = load("protect_runtime")
 
 
 class BuilderTests(unittest.TestCase):
+    def test_runtime_protection_rejects_a_checkout_and_protects_tools_and_parent_replacement(self):
+        with tempfile.TemporaryDirectory() as temp:
+            workspace = Path(temp) / "checkout"
+            tools = Path(temp) / "tools" / "bin"
+            workspace.mkdir()
+            tools.mkdir(parents=True)
+            with self.assertRaises(ValueError):
+                runtime.targets(str(workspace), (), workspace)
+            roots = runtime.targets(str(tools), (), workspace)
+            calls = []
+            def run(args, **kwargs):
+                calls.append(args)
+                return subprocess.CompletedProcess(args, 0)
+            runtime.protect(roots, run=run)
+            self.assertIn(["sudo", "-n", "chmod", "-R", "go-w", str(tools.resolve())], calls)
+            self.assertIn(["sudo", "-n", "chmod", "go-w", str(tools.parent.resolve())], calls)
+
     def test_configuration_streams_secret_values_without_command_line_or_output_exposure(self):
         calls = []
         def run(args, **kwargs):
