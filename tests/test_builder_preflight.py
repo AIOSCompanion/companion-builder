@@ -154,7 +154,10 @@ class BuilderTests(unittest.TestCase):
             suite, = plan.SUITES[repository]
             self.assertTrue(suite["run"].startswith(".venv/bin/python -m pytest"))
             self.assertNotIn("uv run", suite["run"])
-        self.assertIn("--extra dev", plan.SUITES["companion-memory"][0]["setup"])
+        memory_setup = plan.SUITES["companion-memory"][0]["setup"]
+        self.assertIn("uv sync --project ../aiosxaegra --locked", memory_setup)
+        self.assertIn("--editable '.[dev]'", memory_setup)
+        self.assertIn("ln -s ../aiosxaegra/.venv .venv", memory_setup)
 
     def test_public_self_check_has_no_secrets_private_checkout_or_release(self):
         text = (ROOT / ".github/workflows/self-check.yml").read_text()

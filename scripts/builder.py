@@ -66,11 +66,16 @@ def doctor(mode, get=api):
     return missing_configuration(mode, variables, secrets, environment, policies, env_secrets)
 
 
-def dispatch_args(command, repository=None, sha=None, tag=None):
+def dispatch_args(command, repository=None, sha=None, tag=None, *, memory_sha=None, engine_sha=None):
     if command == "test":
         if repository not in REPOSITORIES or not re.fullmatch(r"[0-9a-f]{40}", sha or ""):
             raise ValueError("test requires an allowed repository and a full lowercase commit SHA")
         workflow, inputs = "test.yml", ["-f", f"repository={repository}", "-f", f"head_sha={sha}"]
+        for name, value, allowed in [("memory_sha", memory_sha, "aiosxaegra"), ("engine_sha", engine_sha, "companion-memory")]:
+            if value is not None:
+                if repository != allowed or not re.fullmatch(r"[0-9a-f]{40}", value):
+                    raise ValueError(f"{name} requires its matching suite and a full lowercase commit SHA")
+                inputs.extend(["-f", f"{name}={value}"])
     elif command == "release":
         if not re.fullmatch(r"v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", tag or ""):
             raise ValueError("release requires a version tag, not a branch")
@@ -88,6 +93,8 @@ def main(argv=None):
     tests = commands.add_parser("test")
     tests.add_argument("repository", choices=REPOSITORIES)
     tests.add_argument("sha")
+    tests.add_argument("--memory-sha")
+    tests.add_argument("--engine-sha")
     release = commands.add_parser("release")
     release.add_argument("tag")
     commands.add_parser("self-check")
@@ -98,7 +105,8 @@ def main(argv=None):
             print(json.dumps({"ready": not missing, "mode": args.mode, "missing": missing}, indent=2))
             return 2 if missing else 0
         command = dispatch_args(args.command, getattr(args, "repository", None), getattr(args, "sha", None),
-                                getattr(args, "tag", None))
+                                getattr(args, "tag", None), memory_sha=getattr(args, "memory_sha", None),
+                                engine_sha=getattr(args, "engine_sha", None))
         if args.command != "self-check":
             missing = doctor(args.command)
             if missing:
