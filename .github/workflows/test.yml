@@ -49,6 +49,7 @@ jobs:
         id: pick
         env:
           REPOSITORY: ${{ inputs.repository }}
+          HEAD_SHA: ${{ inputs.head_sha }}
         run: python3 -B scripts/plan_suites.py --repository "$REPOSITORY"
 
   suite:

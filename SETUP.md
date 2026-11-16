@@ -18,6 +18,14 @@ The automation will push the build scripts into it once review is done. It holds
 
 ## 1. Create the GitHub App (read the contents of four repos)
 
+The Apple signing/notary secrets already exist in `aios-desktop-app` and the previous
+v0.18.0 build used them. Reuse their maintained original values; do not create new
+Apple credentials just because the public builder has not been configured.
+Saved GitHub secret values cannot be read or copied back through the API.
+For automatic commit/main/tag routing, also follow [bridge/README.md](bridge/README.md):
+the App needs the builder installation and the additional scoped dispatch permissions
+described there, and its webhook must be enabled after deploying the receiver.
+
 1. Open https://github.com/organizations/AIOSCompanion/settings/apps (the organisation's **Developer settings**, then **GitHub Apps**).
 2. Click **New GitHub App**.
 3. **GitHub App name**: `companion-builder-reader`

@@ -1,0 +1,13 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "companion-builder-bridge",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-11-16",
+  "workers_dev": true,
+  "observability": { "enabled": false },
+  "vars": { "BRIDGE_ENABLED": "false", "BRIDGE_APP_ID": "" },
+  "durable_objects": {
+    "bindings": [{ "name": "DELIVERIES", "class_name": "Delivery" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Delivery"] }]
+}

@@ -25,6 +25,17 @@ jobs:
         run: python -m pip install --disable-pip-version-check PyYAML==6.0.2
       - name: Test the builder and validate workflow contracts
         run: python -m unittest discover -s tests -v
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Test signed event delivery, routing and durable retries
+        run: node --test bridge/worker.test.mjs
+      - name: Install the pinned public Worker test runtime
+        working-directory: bridge
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Exercise signed delivery through a real SQLite Durable Object and alarm
+        working-directory: bridge
+        run: node --test runtime.test.mjs
 
   isolation:
     name: Prove hosted Linux isolation with public synthetic data

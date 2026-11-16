@@ -49,6 +49,11 @@ The release-signing environment permits the builder's **main branch**; the priva
 workflow input. Sidecar pins are read from that selected private release, not copied from this builder.
 
 - `self-check.yml`: tests this public builder only, with no private-source credentials or signing material.
+- `bridge/`: authenticated GitHub App event receiver for private pushes, same-repo PR heads
+  and new desktop version tags. Deployment and live delivery require the configuration in
+  [bridge/README.md](bridge/README.md); until then, dispatch remains manual.
+- `bridge-deploy.yml`: deploys that receiver from this public repository, behind its own
+  protected environment. It never enables acceptance before the Worker secrets exist.
 
 - `release.yml`: release builds for a tag on the private repository. Dispatch only, from this repository's
   default branch, into the `release-signing` environment, which needs an approval.
@@ -68,5 +73,7 @@ workflow input. Sidecar pins are read from that selected private release, not co
   .credentials_rsaparams) and the worker process's environment are report-only, not gated: each is reported as
   absent, denied, or READABLE. A READABLE item blocks private-source work. Runtime protection removes other-user
   access before the probe; undiscoverable runner processes also block the suite. The gpg keyring is protected by 0700.
-- The first run of each workflow on GitHub has not yet been made. The namespace, the test-user lines, and gpg on
-  the macOS and Windows runners are unverified until it has.
+- The builder self-check has passed on hosted Ubuntu, macOS and Windows, including calibrated
+  isolation and real encryption/decryption using disposable keys. Private checkout, real product tests,
+  signing/notarisation, installer checks and release publication remain separate acceptance gates.
+  Do not treat synthetic checks as proof those integrations are operational.
