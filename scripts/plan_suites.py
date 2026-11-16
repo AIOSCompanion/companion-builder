@@ -36,6 +36,16 @@ SUITES = {
     ],
 }
 
+# Native-host/PTY tests are intentionally slow. Every shard collects the complete
+# suite, then hashes node IDs into a disjoint partition; no tests are dropped.
+_engine = SUITES['aiosxaegra'][0]
+SUITES['aiosxaegra'] = [dict(_engine, **{
+    'suite': f'engine unit tests shard {index + 1}/8 (pytest)',
+    'run': f'.venv/bin/python @TRUSTED_SHARD_RUNNER@ --index {index} --count 8 -- '
+           'tests/unit -vv --maxfail=1 -o faulthandler_timeout=120 --tb=short '
+           '-p no:cacheprovider --junitxml=junit.xml',
+}) for index in range(8)]
+
 
 class PlanError(Exception):
     pass

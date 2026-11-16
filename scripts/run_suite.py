@@ -47,6 +47,8 @@ def main(argv=None, *, run=subprocess.run, env=None):
     env = dict(os.environ if env is None else env)
     suite = env.get("SUITE_NAME", "")
     command = env.get("TEST_COMMAND", "")
+    command = command.replace('@TRUSTED_SHARD_RUNNER@',
+                              shlex.quote(str(Path(__file__).resolve().parent / 'shard_pytest.py')))
     recipient = env.get("LOG_RECIPIENT", "")
     log_dir = env.get("SEALED_LOG_DIR", "")
     if not (suite and command and recipient and log_dir):
