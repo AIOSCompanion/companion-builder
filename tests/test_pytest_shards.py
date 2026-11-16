@@ -14,6 +14,12 @@ spec.loader.exec_module(shards)
 
 
 class ShardTests(unittest.TestCase):
+    def test_full_engine_shards_keep_collecting_failures(self):
+        import plan_suites
+        for suite in plan_suites.SUITES['aiosxaegra']:
+            self.assertNotIn('--maxfail', suite['run'])
+            self.assertIn('--junitxml=junit.xml', suite['run'])
+
     def test_real_pytest_reports_every_synthetic_test_once(self):
         with tempfile.TemporaryDirectory(prefix='builder-shard-') as temporary:
             folder = Path(temporary)

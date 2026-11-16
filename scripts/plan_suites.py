@@ -42,7 +42,7 @@ _engine = SUITES['aiosxaegra'][0]
 SUITES['aiosxaegra'] = [dict(_engine, **{
     'suite': f'engine unit tests shard {index + 1}/8 (pytest)',
     'run': f'.venv/bin/python @TRUSTED_SHARD_RUNNER@ --index {index} --count 8 -- '
-           'tests/unit -vv --maxfail=1 -o faulthandler_timeout=120 --tb=short '
+           'tests/unit -vv -o faulthandler_timeout=120 --tb=short '
            '-p no:cacheprovider --junitxml=junit.xml',
 }) for index in range(8)]
 
