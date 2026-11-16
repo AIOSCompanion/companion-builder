@@ -1,0 +1,11 @@
+{
+  "name": "companion-builder-event-bridge",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test worker.test.mjs runtime.test.mjs"
+  },
+  "devDependencies": {
+    "miniflare": "5.20261113.0-beta"
+  }
+}

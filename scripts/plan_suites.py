@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 import sys
 
@@ -48,8 +49,11 @@ def main(argv=None, *, env=None):
     env = os.environ if env is None else env
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--repository", default=env.get("REPOSITORY", ""))
+    parser.add_argument("--head-sha", default=env.get("HEAD_SHA"))
     args = parser.parse_args(argv)
     try:
+        if args.head_sha is not None and not re.fullmatch(r"[0-9a-f]{40}", args.head_sha):
+            raise PlanError("head SHA must be an immutable 40-character commit")
         line = f"matrix={matrix_for(args.repository)}"
     except PlanError as error:
         print(f"plan_suites: {error}", file=sys.stderr)
