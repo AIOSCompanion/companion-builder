@@ -37,6 +37,9 @@ jobs:
     outputs:
       matrix: ${{ steps.pick.outputs.matrix }}
     steps:
+      - name: Require the trusted builder main branch
+        run: test "$GITHUB_REF" = "refs/heads/main"
+
       - name: Check out the builder (this public repo)
         uses: actions/checkout@v4
         with:
@@ -72,7 +75,7 @@ jobs:
       # The PR head is the code under test. Its token is read-only and is not kept in the git config.
       - name: Create a read-only App token for the private repo
         id: checkout-token
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510
         with:
           app-id: ${{ vars.BUILDER_APP_ID }}
           private-key: ${{ secrets.BUILDER_APP_PRIVATE_KEY }}
@@ -106,6 +109,9 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Protect trusted hosted tools from test-user writes
+        run: python3 -I -B "$RUNNER_TEMP/trusted/protect_runtime.py"
+
       - name: Create the untrusted test user and hand it the PR checkout
         run: python3 -I -B "$RUNNER_TEMP/trusted/prepare_untrusted.py" --user pr-tests --checkout pr --home "$HOME"
 
@@ -126,7 +132,7 @@ jobs:
       # Calibrated: the runner's own empty append to GITHUB_ENV must succeed, and the test user's must be denied for
       # GITHUB_ENV and for the trusted snapshot. A failure stops the run before the suite.
       - name: Prove the test user cannot write the runner's file-command files or the trusted snapshot
-        run: python3 -I -B "$RUNNER_TEMP/trusted/permission_probe.py" --trusted "$RUNNER_TEMP/trusted" --workdir pr --workspace "$GITHUB_WORKSPACE" --path "$PATH" --home "$HOME"
+        run: python3 -I -B "$RUNNER_TEMP/trusted/permission_probe.py" --trusted "$RUNNER_TEMP/trusted" --workdir pr --workspace "$GITHUB_WORKSPACE" --path "$PATH" --home "$HOME" --require-runner-denials
 
       - name: Verify the trusted scripts before the suite
         run: python3 -I -B "$RUNNER_TEMP/trusted/snapshot_trusted.py" verify --dest "$RUNNER_TEMP/trusted"
@@ -162,8 +168,8 @@ jobs:
 
   status:
     name: Post the status to the private PR head
-    needs: suite
-    if: always()
+    needs: [plan, suite]
+    if: always() && needs.plan.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Check out the builder (this public repo)
@@ -173,7 +179,7 @@ jobs:
 
       - name: Create an App token with statuses write (this token exists only in this step)
         id: status-token
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510
         with:
           app-id: ${{ vars.BUILDER_APP_ID }}
           private-key: ${{ secrets.BUILDER_APP_PRIVATE_KEY }}

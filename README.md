@@ -29,6 +29,27 @@ Decided by the owner (15 Nov 2026).
 
 ## Workflows
 
+Use this public builder for Companion GitHub CI and release builds from now on. Do not dispatch
+private-repository test/release workflows or add private tag-triggered builds as a fallback.
+The builder checks out private source without making the source repository public.
+
+From a checkout of this repository:
+
+```sh
+python scripts/builder.py doctor --mode test
+python scripts/builder.py test aiosxaegra <full-40-character-commit-sha>
+python scripts/builder.py doctor --mode release
+python scripts/builder.py release v1.2.3
+python scripts/builder.py self-check
+```
+
+`doctor` reports configuration names only. Missing configuration prevents the CLI from dispatching a
+private-source test or release. It does not certify that a first hosted run or signing verification passed.
+The release-signing environment permits the builder's **main branch**; the private version tag is a
+workflow input. Sidecar pins are read from that selected private release, not copied from this builder.
+
+- `self-check.yml`: tests this public builder only, with no private-source credentials or signing material.
+
 - `release.yml`: release builds for a tag on the private repository. Dispatch only, from this repository's
   default branch, into the `release-signing` environment, which needs an approval.
 - `test.yml`: PR tests for a PR head SHA on a private repository. Dispatch only. No `pull_request` trigger.
@@ -45,7 +66,7 @@ Decided by the owner (15 Nov 2026).
 - The runner's home directory is locked to mode 711 where the image allows, so the test user can traverse it but not
   list it. The probe reports the result either way. The runner's install-directory files (.runner, .credentials,
   .credentials_rsaparams) and the worker process's environment are report-only, not gated: each is reported as
-  absent, denied, or READABLE, and a READABLE item prints a warning. The first run decides whether any of them
-  becomes a gate. The gpg keyring is protected by gpg's own 0700.
+  absent, denied, or READABLE. A READABLE item blocks private-source work. Runtime protection removes other-user
+  access before the probe; undiscoverable runner processes also block the suite. The gpg keyring is protected by 0700.
 - The first run of each workflow on GitHub has not yet been made. The namespace, the test-user lines, and gpg on
   the macOS and Windows runners are unverified until it has.
