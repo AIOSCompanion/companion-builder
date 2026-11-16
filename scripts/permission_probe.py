@@ -150,8 +150,16 @@ def build_attacks(*, trusted, runner_temp, workspace, path_dirs, github_env, git
         ("create a file in the snapshot", "create", str(trusted / "probe-new"), None),
         ("rename the snapshot", "rename", str(trusted), str(trusted) + ".renamed"),
         ("create a file in RUNNER_TEMP", "create", str(runner_temp / "probe-new"), None),
-        ("create RUNNER_TEMP/sealed", "mkdir", str(runner_temp / "sealed"), None),
     ]
+    sealed = runner_temp / "sealed"
+    if sealed.exists():
+        attacks.extend([
+            ("create a file in RUNNER_TEMP/sealed", "create", str(sealed / "probe-new"), None),
+            ("create a directory in RUNNER_TEMP/sealed", "mkdir", str(sealed / "probe-new-dir"), None),
+            ("rename RUNNER_TEMP/sealed", "rename", str(sealed), str(sealed) + ".renamed"),
+        ])
+    else:
+        attacks.append(("create RUNNER_TEMP/sealed", "mkdir", str(sealed), None))
     for directory in path_dirs:
         directory = Path(directory)
         if not str(directory) or str(directory).startswith(user_home):

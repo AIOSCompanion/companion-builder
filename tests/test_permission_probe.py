@@ -106,6 +106,31 @@ class PermissionProbeTests(unittest.TestCase):
         with self.assertRaisesRegex(permission_probe.ProbeError, "could create RUNNER_TEMP/sealed"):
             self.probe(make_run(allowed=[str(self.runner_temp / "sealed")]))
 
+    def test_existing_install_logs_are_preserved_and_probe_targets_do_not_already_exist(self):
+        sealed = self.runner_temp / "sealed"
+        sealed.mkdir()
+        log = sealed / "install.log.gpg"
+        log.write_bytes(b"synthetic-encrypted-log")
+        calls = []
+        fake = make_run()
+        def run(argv, **kwargs):
+            if permission_probe.PROBE_SCRIPT in argv:
+                calls.extend(json.loads(argv[-1]))
+            return fake(argv, **kwargs)
+        lines = self.probe(run)
+        for label, kind, target, _ in calls:
+            if kind in ("create", "mkdir") and "sealed" in label:
+                self.assertFalse(Path(target).exists(), "an existing target gives EEXIST rather than a permission result")
+        self.assertTrue(any("rename RUNNER_TEMP/sealed: refused" in line for line in lines))
+        self.assertEqual(log.read_bytes(), b"synthetic-encrypted-log")
+
+    def test_existing_sealed_directory_still_refuses_file_creation_and_replacement(self):
+        sealed = self.runner_temp / "sealed"
+        sealed.mkdir()
+        for path in (sealed / "probe-new", sealed / "probe-new-dir", sealed):
+            with self.subTest(path=path), self.assertRaises(permission_probe.ProbeError):
+                self.probe(make_run(allowed=[str(path)]))
+
     def test_a_rename_of_the_snapshot_is_refused(self):
         with self.assertRaisesRegex(permission_probe.ProbeError, "could rename the snapshot"):
             self.probe(make_run(allowed=[str(self.trusted)]))
