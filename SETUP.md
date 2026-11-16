@@ -16,7 +16,7 @@ The automation's token may not be allowed to create an organisation repository. 
 
 The automation will push the build scripts into it once review is done. It holds build scripts and workflows only. The Companion code stays in the private repositories.
 
-## 1. Create the GitHub App (read the contents of four repos)
+## 1. Configure the dedicated GitHub App
 
 The Apple signing/notary secrets already exist in `aios-desktop-app` and the previous
 v0.18.0 build used them. Reuse their maintained original values; do not create new
@@ -30,18 +30,25 @@ described there, and its webhook must be enabled after deploying the receiver.
 2. Click **New GitHub App**.
 3. **GitHub App name**: `companion-builder-reader`
 4. **Homepage URL**: `https://github.com/AIOSCompanion/companion-builder`
-5. Turn **Webhook** off (untick **Active**).
+5. Leave **Webhook** off during initial setup. After the event receiver is deployed,
+   enable it using the URL, secret and event subscriptions in `bridge/README.md`.
 6. Under **Repository permissions**, set:
    - **Contents**: **Read-only**
    - **Commit statuses**: **Read and write**
-   Set nothing else.
+   - **Pull requests**: **Read-only** (same-repo PR event subscriptions).
+   - **Actions**: **Read and write** (dispatches into the builder only).
+   Checkout and status jobs request narrower tokens. The event receiver requests an
+   Actions-write token scoped only to `companion-builder`; private Actions stay disabled.
 7. Under **Where can this GitHub App be installed?**, choose **Only on this account**.
 8. Click **Create GitHub App**.
 9. On the app's page, note the **App ID** (a number). Put it in the public repo as a **variable**: go to `companion-builder` → **Settings** → **Secrets and variables** → **Actions** → **Variables** tab → **New repository variable**. Name: `BUILDER_APP_ID`. Value: the number.
 10. On the app's page, scroll to **Private keys** and click **Generate a private key**. A `.pem` file downloads.
 11. Back in `companion-builder` → **Settings** → **Secrets and variables** → **Actions** → **Secrets** tab → **New repository secret**. Name: `BUILDER_APP_PRIVATE_KEY`. In the value box, paste the whole contents of the `.pem` file (open it in Notepad, select all, copy, paste). Then delete the `.pem` file from your Downloads folder.
 12. On the app's page, click **Install App** (left side), then **Install** next to AIOSCompanion.
-13. Choose **Only select repositories** and pick exactly these four: `aios-desktop-app`, `aiosxaegra`, `companion-memory`, `aios-companion-releases`. The last one lets the App read the published runtime and manifest assets, so the write token is not needed for reads. Click **Install**.
+13. Choose **Only select repositories** and pick exactly these five: `aios-desktop-app`,
+    `aiosxaegra`, `companion-memory`, `aios-companion-releases`, `companion-builder`.
+    The releases repo permits runtime/manifest reads; the builder installation permits
+    workflow dispatch. Click **Install**.
 
 Check: the app should not be installed on any other repository.
 
