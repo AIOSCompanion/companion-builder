@@ -40,7 +40,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: pr-tests-${{ inputs.repository }}-${{ inputs.head_sha }}
+  group: pr-tests-${{ inputs.repository }}-${{ inputs.head_sha }}-${{ github.sha }}-${{ inputs.memory_sha }}-${{ inputs.engine_sha }}-${{ inputs.diagnostic }}
   cancel-in-progress: false
 
 jobs:

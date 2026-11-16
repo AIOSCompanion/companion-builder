@@ -171,6 +171,9 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(native["if"], "matrix.suite == 'desktop unit tests (vitest)'")
         self.assertIn("libxtst-dev libpng++-dev", native["run"])
         self.assertLess(steps.index(native), next(i for i, step in enumerate(steps) if step.get("name") == "Protect trusted hosted tools from test-user writes"))
+        group=workflow["concurrency"]["group"]
+        for component in ("github.sha", "inputs.head_sha", "inputs.memory_sha", "inputs.engine_sha", "inputs.diagnostic"):
+            self.assertIn(component,group)
 
     def test_public_self_check_has_no_secrets_private_checkout_or_release(self):
         text = (ROOT / ".github/workflows/self-check.yml").read_text()
