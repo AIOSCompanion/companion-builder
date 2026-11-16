@@ -35,12 +35,16 @@ on:
         required: false
         type: boolean
         default: false
+      desktop_sha:
+        description: Optional full desktop peer commit for engine source-contract tests
+        required: false
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: pr-tests-${{ inputs.repository }}-${{ inputs.head_sha }}-${{ github.sha }}-${{ inputs.memory_sha }}-${{ inputs.engine_sha }}-${{ inputs.diagnostic }}
+  group: pr-tests-${{ inputs.repository }}-${{ inputs.head_sha }}-${{ github.sha }}-${{ inputs.memory_sha }}-${{ inputs.engine_sha }}-${{ inputs.desktop_sha }}-${{ inputs.diagnostic }}
   cancel-in-progress: false
 
 jobs:
@@ -98,6 +102,7 @@ jobs:
           repositories: |
             ${{ inputs.repository }}
             ${{ inputs.repository == 'aiosxaegra' && 'companion-memory' || 'aiosxaegra' }}
+            ${{ inputs.repository == 'aiosxaegra' && 'aios-desktop-app' || '' }}
           permission-contents: read
 
       - name: Check out the PR head into pr/ (contents read only)
@@ -150,6 +155,25 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Resolve the engine desktop contract peer to an immutable commit
+        if: matrix.repo == 'aiosxaegra'
+        id: desktop-peer
+        env:
+          GH_TOKEN: ${{ steps.checkout-token.outputs.token }}
+          MEMORY_SHA: ${{ inputs.desktop_sha }}
+          DEPENDENCY_REPOSITORY: aios-desktop-app
+        run: python3 -I -B "$RUNNER_TEMP/trusted/resolve_memory_dependency.py"
+
+      - name: Check out the pinned desktop source contracts beside the engine
+        if: matrix.repo == 'aiosxaegra'
+        uses: actions/checkout@v4
+        with:
+          repository: AIOSCompanion/aios-desktop-app
+          ref: ${{ steps.desktop-peer.outputs.sha }}
+          token: ${{ steps.checkout-token.outputs.token }}
+          path: aios-desktop-app
+          persist-credentials: false
+
       - name: Import the team's public log key (a variable, not a secret)
         env:
           TEST_LOG_PUBLIC_KEY: ${{ vars.TEST_LOG_PUBLIC_KEY }}
@@ -187,6 +211,10 @@ jobs:
 
       # The PR's install runs as the test user: it keeps egress (the only step that may fetch packages), and its
       # output is sealed. It cannot write the trusted scripts or read this process's environment.
+      - name: Hand the engine desktop peer to the same test user
+        if: matrix.repo == 'aiosxaegra'
+        run: python3 -I -B "$RUNNER_TEMP/trusted/prepare_untrusted.py" --checkout aios-desktop-app --home "$HOME"
+
       - name: Install dependencies (as the test user, output sealed)
         working-directory: pr
         env:
