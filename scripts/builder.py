@@ -71,9 +71,9 @@ def dispatch_args(command, repository=None, sha=None, tag=None, *, memory_sha=No
         if repository not in REPOSITORIES or not re.fullmatch(r"[0-9a-f]{40}", sha or ""):
             raise ValueError("test requires an allowed repository and a full lowercase commit SHA")
         workflow, inputs = "test.yml", ["-f", f"repository={repository}", "-f", f"head_sha={sha}"]
-        for name, value, allowed in [("memory_sha", memory_sha, "aiosxaegra"), ("engine_sha", engine_sha, "companion-memory")]:
+        for name, value, allowed in [("memory_sha", memory_sha, {"aiosxaegra"}), ("engine_sha", engine_sha, {"companion-memory", "aios-desktop-app"})]:
             if value is not None:
-                if repository != allowed or not re.fullmatch(r"[0-9a-f]{40}", value):
+                if repository not in allowed or not re.fullmatch(r"[0-9a-f]{40}", value):
                     raise ValueError(f"{name} requires its matching suite and a full lowercase commit SHA")
                 inputs.extend(["-f", f"{name}={value}"])
     elif command == "release":

@@ -40,6 +40,8 @@ class MemoryDependencyTests(unittest.TestCase):
     def test_cli_accepts_only_the_matching_pinned_peer(self):
         args = dispatch_args("test", repository="companion-memory", sha="a" * 40, engine_sha="b" * 40)
         self.assertIn("engine_sha=" + "b" * 40, args)
+        desktop_args = dispatch_args("test", repository="aios-desktop-app", sha="a" * 40, engine_sha="b" * 40)
+        self.assertIn("engine_sha=" + "b" * 40, desktop_args)
         for kwargs in [{"engine_sha": "main"}, {"memory_sha": "b" * 40}]:
             with self.assertRaises(ValueError):
                 dispatch_args("test", repository="companion-memory", sha="a" * 40, **kwargs)

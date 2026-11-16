@@ -28,7 +28,7 @@ SUITES = {
     ],
     "aios-desktop-app": [
         {"suite": "desktop unit tests (vitest)", "repo": "aios-desktop-app",
-         "setup": "npm ci --ignore-scripts", "run": "npx vitest run --reporter=junit --outputFile=junit.xml"},
+         "setup": "npm ci --no-audit --no-fund", "run": "npx vitest run --reporter=junit --outputFile=junit.xml"},
         {"suite": "desktop typecheck", "repo": "aios-desktop-app",
          "setup": "npm ci --ignore-scripts", "run": "npm run typecheck"},
     ],
