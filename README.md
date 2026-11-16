@@ -29,6 +29,27 @@ Decided by the owner (15 Nov 2026).
 
 ## Workflows
 
+Use this public builder for Companion GitHub CI and release builds from now on. Do not dispatch
+private-repository test/release workflows or add private tag-triggered builds as a fallback.
+The builder checks out private source without making the source repository public.
+
+From a checkout of this repository:
+
+```sh
+python scripts/builder.py doctor --mode test
+python scripts/builder.py test aiosxaegra <full-40-character-commit-sha>
+python scripts/builder.py doctor --mode release
+python scripts/builder.py release v1.2.3
+python scripts/builder.py self-check
+```
+
+`doctor` reports configuration names only. Missing configuration prevents the CLI from dispatching a
+private-source test or release. It does not certify that a first hosted run or signing verification passed.
+The release-signing environment permits the builder's **main branch**; the private version tag is a
+workflow input. Sidecar pins are read from that selected private release, not copied from this builder.
+
+- `self-check.yml`: tests this public builder only, with no private-source credentials or signing material.
+
 - `release.yml`: release builds for a tag on the private repository. Dispatch only, from this repository's
   default branch, into the `release-signing` environment, which needs an approval.
 - `test.yml`: PR tests for a PR head SHA on a private repository. Dispatch only. No `pull_request` trigger.

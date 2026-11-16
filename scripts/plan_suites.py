@@ -18,12 +18,12 @@ SUITES = {
     "aiosxaegra": [
         {"suite": "engine unit tests (pytest)", "repo": "aiosxaegra",
          "setup": "pip install --quiet --user uv && uv sync --locked --extra voice-worker",
-         "run": "uv run --extra voice-worker pytest tests/unit -q --tb=no -p no:cacheprovider --junitxml=junit.xml"},
+         "run": ".venv/bin/python -m pytest tests/unit -q --tb=no -p no:cacheprovider --junitxml=junit.xml"},
     ],
     "companion-memory": [
         {"suite": "memory unit tests (pytest)", "repo": "companion-memory",
-         "setup": "pip install --quiet --user uv && uv sync --locked",
-         "run": "python -m pytest -q --tb=no -p no:cacheprovider --junitxml=junit.xml"},
+         "setup": "pip install --quiet --user uv && uv sync --locked --extra dev",
+         "run": ".venv/bin/python -m pytest -q --tb=no -p no:cacheprovider --junitxml=junit.xml"},
     ],
     "aios-desktop-app": [
         {"suite": "desktop unit tests (vitest)", "repo": "aios-desktop-app",

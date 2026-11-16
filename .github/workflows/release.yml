@@ -32,7 +32,7 @@ concurrency:
 
 jobs:
   # Every job waits for the owner's approval in the release-signing environment (required reviewer), and
-  # its deployment-branch rule admits only tags matching v*.
+  # its deployment-branch rule admits only the builder's main branch (not the private input tag).
 
   source:
     name: Pin the tag and create the draft
@@ -51,7 +51,7 @@ jobs:
 
       - name: Create a read-only App token for the three private repositories
         id: app
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510
         with:
           app-id: ${{ vars.BUILDER_APP_ID }}
           private-key: ${{ secrets.BUILDER_APP_PRIVATE_KEY }}
@@ -110,14 +110,18 @@ jobs:
       - name: Install the metadata helper's dependency
         run: python3 -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "install metadata helper dependency" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" -- python3 -m pip install --quiet 'PyYAML==6.0.2'
 
+      - name: Read immutable sidecar pins from this private release
+        id: pins
+        run: python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "read release pins" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" --export-output aegra_sha --export-output memory_sha -- python3 -B "$RUNNER_TEMP/trusted/read_release_pins.py" --workflow .github/workflows/release.yml
+
       - name: Resolve the sidecar SHAs (one source of truth for every row)
         id: refs
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
-          AEGRA_REF: '167d5c8c5e4ef227fa6cd8410ab9f949a661ed07'
-          MEMORY_REF: '821d32b9005f885cdec52b6712184fe1c41c77ff'
-          EXPECTED_AEGRA_SHA: '167d5c8c5e4ef227fa6cd8410ab9f949a661ed07'
-          EXPECTED_MEMORY_SHA: '821d32b9005f885cdec52b6712184fe1c41c77ff'
+          AEGRA_REF: ${{ steps.pins.outputs.aegra_sha }}
+          MEMORY_REF: ${{ steps.pins.outputs.memory_sha }}
+          EXPECTED_AEGRA_SHA: ${{ steps.pins.outputs.aegra_sha }}
+          EXPECTED_MEMORY_SHA: ${{ steps.pins.outputs.memory_sha }}
         run: python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name "resolve sidecar pins" --log-dir sealed/logs --recipient "$LOG_RECIPIENT" --export-output aegra_sha --export-output memory_sha -- python3 -B scripts/release/resolve_pins.py
 
       # The only step that writes to the releases repository in this job. The write PAT is on this step alone.
@@ -165,7 +169,7 @@ jobs:
 
       - name: Create a read-only App token for the private repositories
         id: app
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510
         with:
           app-id: ${{ vars.BUILDER_APP_ID }}
           private-key: ${{ secrets.BUILDER_APP_PRIVATE_KEY }}
@@ -367,7 +371,7 @@ jobs:
 
       - name: Create a read-only App token for the private repositories
         id: app
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510
         with:
           app-id: ${{ vars.BUILDER_APP_ID }}
           private-key: ${{ secrets.BUILDER_APP_PRIVATE_KEY }}
@@ -520,7 +524,7 @@ jobs:
     steps:
       - name: Create a read-only App token for the private repositories
         id: app
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510
         with:
           app-id: ${{ vars.BUILDER_APP_ID }}
           private-key: ${{ secrets.BUILDER_APP_PRIVATE_KEY }}
@@ -655,7 +659,7 @@ jobs:
     steps:
       - name: Create a read-only App token for the private repositories
         id: app
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510
         with:
           app-id: ${{ vars.BUILDER_APP_ID }}
           private-key: ${{ secrets.BUILDER_APP_PRIVATE_KEY }}

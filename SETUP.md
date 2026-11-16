@@ -54,14 +54,14 @@ Signing secrets never sit at repository level. They sit in an environment that n
 
 1. In `companion-builder`, go to **Settings** → **Environments** → **New environment**. Name: `release-signing`. Click **Configure environment**.
 2. Tick **Required reviewers**, add yourself (`Al-aminI`), and save.
-3. Under **Deployment branches and tags**, choose **Selected branches and tags**, and add a tag rule: `v*`.
+3. Under **Deployment branches and tags**, choose **Selected branches and tags**, and add a **Branch** rule: `main`. The workflow dispatch runs from the builder's main branch; its input names a separate tag in the private source repository. Do not use a `v*` tag rule here: GitHub checks the workflow's ref, not its input.
 4. Under **Environment secrets**, click **Add secret** for each of these, pasting the value from the place it already lives (your Apple developer account or the `aios-desktop-app` repository secrets):
    - `APPLE_API_KEY`: the App Store Connect API key file contents (the `.p8` text).
    - `APPLE_API_KEY_ID`: the key ID.
    - `APPLE_API_ISSUER`: the issuer ID.
    - `CSC_LINK`: the Developer ID certificate, base64.
    - `CSC_KEY_PASSWORD`: the certificate password.
-   - `DOTENV_PRODUCTION_B64`: the build-time settings file, base64. It is baked into the app at build time and never printed. Copy it from the `aios-desktop-app` repository secret of the same name.
+   - `DOTENV_PRODUCTION_B64`: the original build-time settings file, base64. GitHub cannot reveal an existing secret's value; obtain it from the maintained release configuration, not the GitHub Secrets page.
    - `SENTRY_AUTH_TOKEN`: lets the build upload source maps to Sentry. Copy it from the `aios-desktop-app` secret of the same name.
    - `CLOUDFLARE_AUTH_TOKEN`: the Workers AI token the app uses for memory embeddings. Copy it from the `aios-desktop-app` secret of the same name.
    - `CLOUDFLARE_ACCOUNT_ID`: the Cloudflare account the Workers AI token belongs to. Copy it from the `aios-desktop-app` secret of the same name.
@@ -84,6 +84,13 @@ Writing to `aios-companion-releases` (creating the draft, uploading assets, the 
 When the token expires, make a new one the same way and replace the secret.
 
 ## 5. Check before the first test run
+
+GitHub cannot reveal saved repository secret values. Use the original certificate, notary key and maintained
+release configuration to populate the environment; listing a secret's name does not copy its value.
+Never paste any of these values into a conversation.
+
+Run `python scripts/builder.py doctor --mode test` and `--mode release` to see missing configuration names.
+Use `python scripts/builder.py self-check` to verify public builder code independently of private credentials.
 
 Tell the maintainer when steps 1 to 4 are done. It will then run one test on a throwaway tag. That run is free. Please do not add any other secrets to the public repository.
 
