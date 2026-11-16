@@ -1,10 +1,13 @@
 import importlib.util
 from pathlib import Path
 import unittest
+import sys
+import subprocess
 
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
 
 
 def load(name):
@@ -17,9 +20,20 @@ def load(name):
 builder = load("builder")
 pins = load("read_release_pins")
 plan = load("plan_suites")
+configure = load("configure")
 
 
 class BuilderTests(unittest.TestCase):
+    def test_configuration_streams_secret_values_without_command_line_or_output_exposure(self):
+        calls = []
+        def run(args, **kwargs):
+            calls.append((args, kwargs))
+            return subprocess.CompletedProcess(args, 0)
+        configure.set_value("secret", "BUILDER_APP_PRIVATE_KEY", "synthetic-value", run=run)
+        self.assertNotIn("synthetic-value", calls[0][0])
+        self.assertEqual(calls[0][1]["input"], "synthetic-value")
+        self.assertTrue(calls[0][1]["capture_output"])
+
     def test_dispatches_never_target_private_actions(self):
         for command, kwargs in [("test", {"repository": "aiosxaegra", "sha": "a" * 40}),
                                 ("release", {"tag": "v1.2.3"}), ("self-check", {})]:

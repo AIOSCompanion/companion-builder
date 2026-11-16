@@ -92,6 +92,16 @@ Never paste any of these values into a conversation.
 Run `python scripts/builder.py doctor --mode test` and `--mode release` to see missing configuration names.
 Use `python scripts/builder.py self-check` to verify public builder code independently of private credentials.
 
+The owner can populate the test configuration from original local files without copying secrets into a terminal command:
+
+```sh
+python scripts/configure.py --app-id APP_ID --app-key-file /path/to/app-key.pem --log-public-key-file /path/to/team-public.asc --log-recipient TEAM_KEY_FINGERPRINT
+```
+
+`--release-files /path/to/map.json` additionally accepts a JSON object mapping the environment-secret names above
+to local text files containing their intended values (including base64 text where specified). Values are streamed
+to `gh secret set` through stdin and never printed. The helper reads only paths the owner explicitly supplies.
+
 Tell the maintainer when steps 1 to 4 are done. It will then run one test on a throwaway tag. That run is free. Please do not add any other secrets to the public repository.
 
 ## What the automation will not do
