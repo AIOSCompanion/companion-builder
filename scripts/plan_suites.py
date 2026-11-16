@@ -23,7 +23,7 @@ SUITES = {
     ],
     "companion-memory": [
         {"suite": "memory unit tests (pytest)", "repo": "companion-memory",
-         "setup": "pip install --quiet --user uv && uv sync --locked --extra dev",
+         "setup": "pip install --quiet --user uv && uv sync --project ../aiosxaegra --locked --extra voice-worker && uv export --project ../aiosxaegra --locked --extra voice-worker --no-hashes --no-emit-project > /tmp/engine-constraints.txt && uv pip install --python ../aiosxaegra/.venv/bin/python --constraint /tmp/engine-constraints.txt --editable '.[dev]' && ln -s ../aiosxaegra/.venv .venv",
          "run": ".venv/bin/python -m pytest -q --tb=no -p no:cacheprovider --junitxml=junit.xml"},
     ],
     "aios-desktop-app": [

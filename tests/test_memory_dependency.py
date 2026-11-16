@@ -5,6 +5,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from resolve_memory_dependency import resolve
+from builder import dispatch_args
 
 
 class MemoryDependencyTests(unittest.TestCase):
@@ -23,3 +24,22 @@ class MemoryDependencyTests(unittest.TestCase):
             return SimpleNamespace(stdout="b" * 40 + "\n")
         self.assertEqual(resolve("", run), "b" * 40)
         self.assertEqual(calls[0][2], "repos/AIOSCompanion/companion-memory/commits/main")
+
+    def test_engine_peer_is_pinned_the_same_way(self):
+        calls = []
+        def run(command, **kwargs):
+            calls.append(command)
+            return SimpleNamespace(stdout="c" * 40)
+        self.assertEqual(resolve("", run, repository="aiosxaegra"), "c" * 40)
+        self.assertEqual(calls[0][2], "repos/AIOSCompanion/aiosxaegra/commits/main")
+
+    def test_unknown_repository_is_refused_before_network(self):
+        with self.assertRaises(ValueError):
+            resolve("a" * 40, repository="another-private-repo")
+
+    def test_cli_accepts_only_the_matching_pinned_peer(self):
+        args = dispatch_args("test", repository="companion-memory", sha="a" * 40, engine_sha="b" * 40)
+        self.assertIn("engine_sha=" + "b" * 40, args)
+        for kwargs in [{"engine_sha": "main"}, {"memory_sha": "b" * 40}]:
+            with self.assertRaises(ValueError):
+                dispatch_args("test", repository="companion-memory", sha="a" * 40, **kwargs)

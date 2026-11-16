@@ -26,6 +26,10 @@ on:
         description: Optional full memory commit for engine integration tests (defaults to resolved main)
         required: false
         type: string
+      engine_sha:
+        description: Optional full engine commit for memory integration tests (defaults to resolved main)
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -88,7 +92,7 @@ jobs:
           owner: AIOSCompanion
           repositories: |
             ${{ inputs.repository }}
-            ${{ inputs.repository == 'aiosxaegra' && 'companion-memory' || '' }}
+            ${{ inputs.repository == 'aiosxaegra' && 'companion-memory' || inputs.repository == 'companion-memory' && 'aiosxaegra' || '' }}
           permission-contents: read
 
       - name: Check out the PR head into pr/ (contents read only)
@@ -98,6 +102,26 @@ jobs:
           ref: ${{ inputs.head_sha }}
           token: ${{ steps.checkout-token.outputs.token }}
           path: pr
+          fetch-depth: ${{ inputs.repository == 'companion-memory' && '0' || '1' }}
+          persist-credentials: false
+
+      - name: Resolve the memory suite engine peer to an immutable commit
+        if: matrix.repo == 'companion-memory'
+        id: engine-peer
+        env:
+          GH_TOKEN: ${{ steps.checkout-token.outputs.token }}
+          MEMORY_SHA: ${{ inputs.engine_sha }}
+          DEPENDENCY_REPOSITORY: aiosxaegra
+        run: python3 -I -B "$RUNNER_TEMP/trusted/resolve_memory_dependency.py"
+
+      - name: Check out the pinned engine peer beside memory
+        if: matrix.repo == 'companion-memory'
+        uses: actions/checkout@v4
+        with:
+          repository: AIOSCompanion/aiosxaegra
+          ref: ${{ steps.engine-peer.outputs.sha }}
+          token: ${{ steps.checkout-token.outputs.token }}
+          path: aiosxaegra
           persist-credentials: false
 
       - name: Resolve the engine memory dependency to an immutable commit
@@ -145,6 +169,10 @@ jobs:
       - name: Hand the engine memory dependency to the same test user
         if: matrix.repo == 'aiosxaegra'
         run: python3 -I -B "$RUNNER_TEMP/trusted/prepare_untrusted.py" --user pr-tests --checkout companion-memory --home "$HOME"
+
+      - name: Hand the memory suite engine peer to the same test user
+        if: matrix.repo == 'companion-memory'
+        run: python3 -I -B "$RUNNER_TEMP/trusted/prepare_untrusted.py" --user pr-tests --checkout aiosxaegra --home "$HOME"
 
       # The PR's install runs as the test user: it keeps egress (the only step that may fetch packages), and its
       # output is sealed. It cannot write the trusted scripts or read this process's environment.

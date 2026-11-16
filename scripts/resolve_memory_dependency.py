@@ -1,16 +1,17 @@
-"""Resolve the engine's memory test dependency before untrusted code runs."""
-import json
+"""Resolve a fixed companion-memory/engine test peer before untrusted code runs."""
 import os
 import re
 import subprocess
 
 
-def resolve(pinned, run=subprocess.run):
+def resolve(pinned, run=subprocess.run, *, repository="companion-memory"):
+    if repository not in {"companion-memory", "aiosxaegra"}:
+        raise ValueError("unsupported test dependency repository")
     if pinned:
         if not re.fullmatch(r"[0-9a-f]{40}", pinned):
             raise ValueError("memory dependency must be a full commit SHA")
         return pinned
-    result = run(["gh", "api", "repos/AIOSCompanion/companion-memory/commits/main", "--jq", ".sha"],
+    result = run(["gh", "api", f"repos/AIOSCompanion/{repository}/commits/main", "--jq", ".sha"],
                  capture_output=True, text=True, check=True)
     sha = result.stdout.strip()
     if not re.fullmatch(r"[0-9a-f]{40}", sha):
@@ -19,6 +20,6 @@ def resolve(pinned, run=subprocess.run):
 
 
 if __name__ == "__main__":
-    sha = resolve(os.getenv("MEMORY_SHA", ""))
+    sha = resolve(os.getenv("MEMORY_SHA", ""), repository=os.getenv("DEPENDENCY_REPOSITORY", "companion-memory"))
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
         output.write(f"sha={sha}\n")
