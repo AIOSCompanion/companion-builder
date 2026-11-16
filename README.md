@@ -75,7 +75,7 @@ Timeouts remain failures; diagnostic runs do not bypass the test or release gate
   and new desktop version tags. Deployment and live delivery require the configuration in
   [bridge/README.md](bridge/README.md); until then, dispatch remains manual.
 - `bridge-deploy.yml`: deploys that receiver from this public repository, behind its own
-  protected environment. It never enables acceptance before the Worker secrets exist.
+  protected environment. It installs the receiver on an existing SSH host with a persistent SQLite outbox.
 
 - `release.yml`: release builds for a tag on the private repository. Dispatch only, from this repository's
   default branch, into the `release-signing` environment, which needs an approval.

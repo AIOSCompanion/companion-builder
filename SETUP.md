@@ -71,8 +71,6 @@ Add these **environment secrets**, alongside its reader App key:
 | `CSC_KEY_PASSWORD` | Password for that certificate. |
 | `DOTENV_PRODUCTION_B64` | Base64 text of the maintained release `.env.production`. |
 | `SENTRY_AUTH_TOKEN` | Maintained Sentry source-map upload credential. |
-| `CLOUDFLARE_AUTH_TOKEN` | Maintained embedding credential required by the selected release scripts. |
-| `CLOUDFLARE_ACCOUNT_ID` | Account ID matching that embedding credential. |
 | `PUBLISH_RELEASES_TOKEN` | Credential scoped to Contents write on `aios-companion-releases`. |
 
 The private repo names the publishing credential `RELEASES_GH_TOKEN`. Reuse its
@@ -83,8 +81,8 @@ repository `aios-companion-releases` only, Contents read/write only. Set an expi
 retain its original securely. Never copy the broad local `gh` login token.
 
 Do not add `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID`, Composio or Gamma
-keys. Reconcile Cloudflare requirements with the relay migration before shipping that
-product change; do not remove an older release's required values and claim relay deployment.
+keys. Memory embeddings use each user's OpenRouter key at runtime. Subscription
+chat does not enable memory. No shared embedding credentials belong in the build.
 
 If the original files cannot be located, GitHub cannot recover their values. Locate
 the maintained originals with the owner; do not re-enable private workflows to extract them.
@@ -127,32 +125,29 @@ dispatch is not a passing test run.
    are refused before any key is uploaded to the service.
 4. Generate and retain its own private key. In **bridge-deploy**, add **variable**
    `BRIDGE_APP_ID` and **secret** `BRIDGE_APP_PRIVATE_KEY`. Never reuse the reader key.
-5. Add **variable** `BRIDGE_CLOUDFLARE_ACCOUNT_ID` for the agreed hosting account and
-   **secret** `BRIDGE_CLOUDFLARE_API_TOKEN`. In Cloudflare, select that account, copy
-   its Account ID, then open **Manage Account → Account API Tokens → Create Token**.
-   Scope it to that account's Workers. Initial creation of a new Worker requires
-   product-level **Workers Admin**; once `companion-builder-bridge` exists, restrict
-   deployment access to **Editor** on that Worker and update this environment secret.
-   Editor can deploy and manage that Worker's secrets. Keep its original token secure.
-   See [Cloudflare's current permission guide](https://developers.cloudflare.com/workers/authorization/workers/).
-   The embedding token is not assumed to permit deployments. Do not change the account's billing plan.
+5. Use an existing Linux host with Node >=22.13, Python3, systemd and a deployment
+   SSH user with passwordless sudo. Add variables `BRIDGE_SSH_HOST`,
+   `BRIDGE_SSH_USER` and secrets `BRIDGE_SSH_PRIVATE_KEY`, `BRIDGE_SSH_KNOWN_HOSTS`.
+   Verify the host key through an existing trusted channel. Never disable SSH host
+   verification. No new hosting account or billing plan is required.
 6. Generate two independent random strings (at least 32 random bytes each), retain
    them securely, and add **environment secrets** `BRIDGE_WEBHOOK_SECRET` and
    `BRIDGE_STATUS_TOKEN`. A password manager can generate these.
 7. Open https://github.com/AIOSCompanion/companion-builder/actions/workflows/bridge-deploy.yml .
    Run from **main**, initially **enable=false**, and approve `bridge-deploy`.
-8. In Cloudflare Workers, open `companion-builder-bridge` and copy its workers.dev URL.
-   After review, dispatch again with **enable=true** and approve it.
+8. Configure the existing host's TLS proxy to route a dedicated HTTPS endpoint to
+   127.0.0.1:8123; see bridge/README.md. After testing HTTPS, dispatch again with
+   **enable=true** and approve it. The deployment retains the SQLite outbox.
 
 Large pushes delegate private history expansion to an approved `source-access` job.
-The running Worker holds only its separate builder-dispatch credential.
+The running receiver holds only its separate builder-dispatch credential.
 
 ## 6. Connect private repository webhooks
 
 For each of `aios-desktop-app`, `aiosxaegra`, and `companion-memory`:
 
 1. **Settings → Webhooks → Add webhook**.
-2. Payload URL `https://YOUR_WORKER_HOST/webhook`; content type **application/json**.
+2. Payload URL `https://YOUR_BRIDGE_HOST/webhook`; content type **application/json**.
 3. Secret: the retained `BRIDGE_WEBHOOK_SECRET`. Keep SSL verification enabled.
 4. **Let me select individual events**: select **Pushes** and **Pull requests**;
    keep **Active** enabled and save.

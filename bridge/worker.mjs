@@ -74,6 +74,7 @@ export async function appJWT(id, pem, now = Date.now()) {
 
 export async function github(path, token, body, request = fetch) {
   const response = await request(`https://api.github.com/${path}`, {
+    signal: AbortSignal.timeout(30_000),
     method: body === undefined ? "GET" : "POST",
     headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json",
       "User-Agent": "companion-builder-bridge", "X-GitHub-Api-Version": "2022-11-28",
@@ -117,7 +118,7 @@ export class Delivery {
   constructor(ctx, env) { this.ctx = ctx; this.env = env; }
 
   async fetch(request) {
-    // Only the bound Worker can call this object; it has no public route of its own.
+    // Only the internal storage adapter can call this delivery handler.
     const url = new URL(request.url);
     if (request.method === "GET") {
       const state = await this.ctx.storage.get("state");
