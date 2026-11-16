@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHmac, generateKeyPairSync, createVerify } from "node:crypto";
 import worker, { envelope, verifySignature, appJWT, dispatch, Delivery } from "./worker.mjs";
+import { auditDispatchApp } from "./audit-app.mjs";
 
 const a = "a".repeat(40), b = "b".repeat(40), zero = "0".repeat(40);
 const repository = { owner: { login: "AIOSCompanion" }, name: "aios-desktop-app",
@@ -9,6 +10,25 @@ const repository = { owner: { login: "AIOSCompanion" }, name: "aios-desktop-app"
 const push = { repository, ref: "refs/heads/main", after: b, before: a, commits: [{ id: a }, { id: b }] };
 const delivery = "11111111-2222-3333-4444-555555555555";
 const secret = "synthetic-webhook-secret-only";
+
+test("deploy scope audit rejects a private-source-capable or broadly installed bridge App", async () => {
+  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const env = { BRIDGE_APP_ID: "12345", BRIDGE_APP_PRIVATE_KEY: privateKey.export({ type: "pkcs1", format: "pem" }) };
+  let extraPermission = false, extraRepo = false;
+  const request = async url => {
+    if (url.endsWith("/app")) return Response.json({ permissions: { actions: "write", ...(extraPermission ? { contents: "read" } : {}) } });
+    if (url.includes("/app/installations?")) return Response.json([{ id: 987, account: { login: "AIOSCompanion" }, repository_selection: "selected" }]);
+    if (url.endsWith("/access_tokens")) return Response.json({ token: "synthetic-token" });
+    if (url.includes("/installation/repositories?")) return Response.json({ total_count: extraRepo ? 2 : 1,
+      repositories: [{ full_name: "AIOSCompanion/companion-builder" }] });
+    throw new Error("unexpected request");
+  };
+  await auditDispatchApp(env, request);
+  extraPermission = true;
+  await assert.rejects(auditDispatchApp(env, request));
+  extraPermission = false; extraRepo = true;
+  await assert.rejects(auditDispatchApp(env, request));
+});
 
 test("HMAC validation uses the exact body; rejects tampering and absent signatures", async () => {
   const body = new TextEncoder().encode('synthetic ü');

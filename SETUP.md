@@ -123,6 +123,8 @@ dispatch is not a passing test run.
 2. Give only **Actions: Read and write**. No Contents, statuses or Pull requests
    permission is needed. Metadata read is implicit.
 3. Install it on **only `companion-builder`**. It must not access private source repos.
+   Deployment verifies the App's actual permissions and installation; broader Apps
+   are refused before any key is uploaded to the service.
 4. Generate and retain its own private key. In **bridge-deploy**, add **variable**
    `BRIDGE_APP_ID` and **secret** `BRIDGE_APP_PRIVATE_KEY`. Never reuse the reader key.
 5. Add **variable** `BRIDGE_CLOUDFLARE_ACCOUNT_ID` for the agreed hosting account and

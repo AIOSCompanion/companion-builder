@@ -72,7 +72,7 @@ export async function appJWT(id, pem, now = Date.now()) {
   return `${data}.${base64url(await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, encoder.encode(data)))}`;
 }
 
-async function github(path, token, body, request = fetch) {
+export async function github(path, token, body, request = fetch) {
   const response = await request(`https://api.github.com/${path}`, {
     method: body === undefined ? "GET" : "POST",
     headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json",
