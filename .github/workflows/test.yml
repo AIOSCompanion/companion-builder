@@ -115,7 +115,8 @@ jobs:
           repository: AIOSCompanion/companion-memory
           ref: ${{ steps.memory-dependency.outputs.sha }}
           token: ${{ steps.checkout-token.outputs.token }}
-          path: dependency-memory
+          path: companion-memory
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Import the team's public log key (a variable, not a secret)
@@ -143,7 +144,7 @@ jobs:
 
       - name: Hand the engine memory dependency to the same test user
         if: matrix.repo == 'aiosxaegra'
-        run: python3 -I -B "$RUNNER_TEMP/trusted/prepare_untrusted.py" --user pr-tests --checkout dependency-memory --home "$HOME"
+        run: python3 -I -B "$RUNNER_TEMP/trusted/prepare_untrusted.py" --user pr-tests --checkout companion-memory --home "$HOME"
 
       # The PR's install runs as the test user: it keeps egress (the only step that may fetch packages), and its
       # output is sealed. It cannot write the trusted scripts or read this process's environment.
