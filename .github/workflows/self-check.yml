@@ -48,7 +48,7 @@ jobs:
       - name: Protect the trusted hosted tools
         run: python -I -B "$RUNNER_TEMP/trusted/protect_runtime.py"
       - name: Prove write isolation and report runner-file permissions
-        run: python -I -B "$RUNNER_TEMP/trusted/permission_probe.py" --trusted "$RUNNER_TEMP/trusted" --workdir smoke-checkout --workspace "$GITHUB_WORKSPACE" --path "$PATH" --home "$HOME"
+        run: python -I -B "$RUNNER_TEMP/trusted/permission_probe.py" --trusted "$RUNNER_TEMP/trusted" --workdir smoke-checkout --workspace "$GITHUB_WORKSPACE" --path "$PATH" --home "$HOME" --require-runner-denials
       - name: Verify snapshot integrity
         run: python -I -B "$RUNNER_TEMP/trusted/snapshot_trusted.py" verify --dest "$RUNNER_TEMP/trusted"
 

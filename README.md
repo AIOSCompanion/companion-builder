@@ -66,7 +66,7 @@ workflow input. Sidecar pins are read from that selected private release, not co
 - The runner's home directory is locked to mode 711 where the image allows, so the test user can traverse it but not
   list it. The probe reports the result either way. The runner's install-directory files (.runner, .credentials,
   .credentials_rsaparams) and the worker process's environment are report-only, not gated: each is reported as
-  absent, denied, or READABLE, and a READABLE item prints a warning. The first run decides whether any of them
-  becomes a gate. The gpg keyring is protected by gpg's own 0700.
+  absent, denied, or READABLE. A READABLE item blocks private-source work. Runtime protection removes other-user
+  access before the probe; undiscoverable runner processes also block the suite. The gpg keyring is protected by 0700.
 - The first run of each workflow on GitHub has not yet been made. The namespace, the test-user lines, and gpg on
   the macOS and Windows runners are unverified until it has.

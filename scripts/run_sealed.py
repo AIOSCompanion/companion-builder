@@ -219,6 +219,7 @@ def _run_body(name, command, *, log_dir, recipient, gpg, junit, seal_dirs, seal_
             sealer.stdin.write(chunk)
         except OSError:
             seal_broken = True
+    child.stdout.close()
     code = child.wait()
     try:
         sealer.stdin.close()

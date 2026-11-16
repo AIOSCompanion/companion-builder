@@ -11,6 +11,9 @@ from pathlib import Path
 import subprocess
 import sys
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from permission_probe import discover_runner_root, RUNNER_REPORT_FILES
+
 
 def targets(path, prefixes, workspace):
     workspace = Path(workspace).resolve()
@@ -31,6 +34,15 @@ def protect(roots, run=subprocess.run):
             raise RuntimeError("a runtime parent could not be protected")
 
 
+def protect_runner_files(root, run=subprocess.run):
+    if root is None:
+        raise RuntimeError("the runner directory could not be identified")
+    for name in RUNNER_REPORT_FILES:
+        path = Path(root) / name
+        if path.is_file() and run(["sudo", "-n", "chmod", "go-rwx", str(path)], check=False).returncode:
+            raise RuntimeError("a runner configuration file could not be protected")
+
+
 def main():
     if os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get("RUNNER_OS") != "Linux":
         print("runtime protection runs only on a disposable hosted Linux runner")
@@ -38,6 +50,7 @@ def main():
     try:
         roots = targets(os.environ.get("PATH", ""), (sys.prefix, sys.base_prefix), os.environ["GITHUB_WORKSPACE"])
         protect(roots)
+        protect_runner_files(discover_runner_root())
         print(f"runtime protection: {len(roots)} trusted tool directories and their parents refuse test-user writes")
         return 0
     except (ValueError, KeyError, RuntimeError):

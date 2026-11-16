@@ -132,7 +132,7 @@ jobs:
       # Calibrated: the runner's own empty append to GITHUB_ENV must succeed, and the test user's must be denied for
       # GITHUB_ENV and for the trusted snapshot. A failure stops the run before the suite.
       - name: Prove the test user cannot write the runner's file-command files or the trusted snapshot
-        run: python3 -I -B "$RUNNER_TEMP/trusted/permission_probe.py" --trusted "$RUNNER_TEMP/trusted" --workdir pr --workspace "$GITHUB_WORKSPACE" --path "$PATH" --home "$HOME"
+        run: python3 -I -B "$RUNNER_TEMP/trusted/permission_probe.py" --trusted "$RUNNER_TEMP/trusted" --workdir pr --workspace "$GITHUB_WORKSPACE" --path "$PATH" --home "$HOME" --require-runner-denials
 
       - name: Verify the trusted scripts before the suite
         run: python3 -I -B "$RUNNER_TEMP/trusted/snapshot_trusted.py" verify --dest "$RUNNER_TEMP/trusted"

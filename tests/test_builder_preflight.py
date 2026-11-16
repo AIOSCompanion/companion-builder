@@ -27,6 +27,18 @@ sealed = load("run_sealed")
 
 
 class BuilderTests(unittest.TestCase):
+    def test_runner_configuration_permissions_are_removed_before_untrusted_code(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / ".credentials"
+            path.write_text("synthetic-data")
+            calls = []
+            def run(args, **kwargs):
+                calls.append(args)
+                return subprocess.CompletedProcess(args, 0)
+            runtime.protect_runner_files(temp, run=run)
+            self.assertEqual(calls, [["sudo", "-n", "chmod", "go-rwx", str(path)]])
+            with self.assertRaises(RuntimeError):
+                runtime.protect_runner_files(None, run=run)
     def test_msys_gpg_paths_use_drive_mounts_without_changing_native_gpg_paths(self):
         msys = ("C:/Program Files/Git/usr/bin/gpg.exe",)
         self.assertEqual(sealed.gpg_filename(msys, "D:/a/_temp/log.gpg", windows=True), "/d/a/_temp/log.gpg")

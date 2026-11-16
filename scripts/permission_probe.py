@@ -319,6 +319,8 @@ def build_parser():
     parser.add_argument("--workspace", default=None)
     parser.add_argument("--path", default=None)
     parser.add_argument("--home", default="/home/runner")
+    parser.add_argument("--require-runner-denials", action="store_true",
+                        help="fail if runner files/environment are readable or discovery is unavailable")
     return parser
 
 
@@ -340,6 +342,9 @@ def main(argv=None, *, run=subprocess.run, env=None, proc="/proc", readlink=os.r
         return 1
     for line in lines:
         print(f"permission probe: {line}")
+    if args.require_runner_denials and any("READABLE" in line or "no Runner." in line for line in lines):
+        print("::error::permission probe: runner configuration access is not denied; private-source work is blocked")
+        return 1
     runner_items = sum(1 for line in lines if line.startswith(("runner file ", "worker environment ")))
     warnings = sum(1 for line in lines if line.startswith("WARNING") or "READABLE" in line or "readable; the 711" in line)
     print(f"permission probe: calibrated; the test user is refused every gated write and read the trusted steps "
