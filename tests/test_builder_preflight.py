@@ -161,7 +161,7 @@ class BuilderTests(unittest.TestCase):
 
     def test_desktop_runtime_tests_do_not_skip_the_canonical_native_install(self):
         suites = plan.SUITES["aios-desktop-app"]
-        self.assertEqual(suites[0]["setup"], "npm ci --no-audit --no-fund")
+        self.assertEqual(suites[0]["setup"], "CFLAGS='-include string.h -D_DEFAULT_SOURCE' npm ci --no-audit --no-fund")
         workflow = yaml.safe_load((ROOT / ".github/workflows/test.yml").read_text())
         steps = workflow["jobs"]["suite"]["steps"]
         peer = next(step for step in steps if step.get("with", {}).get("path") == "aiosxaegra")

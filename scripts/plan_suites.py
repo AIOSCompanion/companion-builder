@@ -28,7 +28,9 @@ SUITES = {
     ],
     "aios-desktop-app": [
         {"suite": "desktop unit tests (vitest)", "repo": "aios-desktop-app",
-         "setup": "npm ci --no-audit --no-fund", "run": "npx vitest run --reporter=junit --outputFile=junit.xml"},
+         # RobotJS 0.6 calls strdup without including string.h. Modern GCC rejects
+         # the missing prototype; provide the real declaration, never suppress it.
+         "setup": "CFLAGS='-include string.h -D_DEFAULT_SOURCE' npm ci --no-audit --no-fund", "run": "npx vitest run --reporter=junit --outputFile=junit.xml"},
         {"suite": "desktop typecheck", "repo": "aios-desktop-app",
          "setup": "npm ci --ignore-scripts", "run": "npm run typecheck"},
     ],
