@@ -5,7 +5,7 @@ import subprocess
 
 
 def resolve(pinned, run=subprocess.run, *, repository="companion-memory"):
-    if repository not in {"companion-memory", "aiosxaegra"}:
+    if repository not in {"companion-memory", "aiosxaegra", "aios-desktop-app"}:
         raise ValueError("unsupported test dependency repository")
     if pinned:
         if not re.fullmatch(r"[0-9a-f]{40}", pinned):

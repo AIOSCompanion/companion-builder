@@ -37,6 +37,23 @@ class MemoryDependencyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             resolve("a" * 40, repository="another-private-repo")
 
+    def test_desktop_peer_is_allowed_only_for_engine_tests(self):
+        self.assertEqual(resolve('d' * 40, repository='aios-desktop-app'), 'd' * 40)
+        args = dispatch_args('test', repository='aiosxaegra', sha='a' * 40, desktop_sha='d' * 40)
+        self.assertIn('desktop_sha=' + 'd' * 40, args)
+        with self.assertRaises(ValueError):
+            dispatch_args('test', repository='companion-memory', sha='a' * 40, desktop_sha='d' * 40)
+
+    def test_engine_contract_checkout_is_immutable_and_receives_no_persistent_token(self):
+        import yaml
+        workflow = yaml.safe_load((Path(__file__).resolve().parents[1] / '.github/workflows/test.yml').read_text())
+        steps = workflow['jobs']['suite']['steps']
+        checkout = next(step for step in steps if step.get('name') == 'Check out the pinned desktop source contracts beside the engine')
+        self.assertEqual(checkout['if'], "matrix.repo == 'aiosxaegra'")
+        self.assertEqual(checkout['with']['ref'], '${{ steps.desktop-peer.outputs.sha }}')
+        self.assertFalse(checkout['with']['persist-credentials'])
+        self.assertEqual(workflow['jobs']['suite']['environment'], 'source-access')
+
     def test_cli_accepts_only_the_matching_pinned_peer(self):
         args = dispatch_args("test", repository="companion-memory", sha="a" * 40, engine_sha="b" * 40)
         self.assertIn("engine_sha=" + "b" * 40, args)
