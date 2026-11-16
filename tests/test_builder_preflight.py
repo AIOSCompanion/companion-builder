@@ -167,6 +167,10 @@ class BuilderTests(unittest.TestCase):
         peer = next(step for step in steps if step.get("with", {}).get("path") == "aiosxaegra")
         self.assertIn("graphs/react_agent/models_registry.json", peer["with"]["sparse-checkout"])
         self.assertFalse(peer["with"]["persist-credentials"])
+        native = next(step for step in steps if step.get("name") == "Install the desktop native build headers")
+        self.assertEqual(native["if"], "matrix.suite == 'desktop unit tests (vitest)'")
+        self.assertIn("libxtst-dev libpng++-dev", native["run"])
+        self.assertLess(steps.index(native), next(i for i, step in enumerate(steps) if step.get("name") == "Protect trusted hosted tools from test-user writes"))
 
     def test_public_self_check_has_no_secrets_private_checkout_or_release(self):
         text = (ROOT / ".github/workflows/self-check.yml").read_text()
