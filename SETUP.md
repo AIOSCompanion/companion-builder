@@ -128,9 +128,14 @@ dispatch is not a passing test run.
 4. Generate and retain its own private key. In **bridge-deploy**, add **variable**
    `BRIDGE_APP_ID` and **secret** `BRIDGE_APP_PRIVATE_KEY`. Never reuse the reader key.
 5. Add **variable** `BRIDGE_CLOUDFLARE_ACCOUNT_ID` for the agreed hosting account and
-   **secret** `BRIDGE_CLOUDFLARE_API_TOKEN` with that account's Worker/Durable Object
-   deployment credential. The embedding token is not assumed to permit deployments.
-   Do not change the account's billing plan.
+   **secret** `BRIDGE_CLOUDFLARE_API_TOKEN`. In Cloudflare, select that account, copy
+   its Account ID, then open **Manage Account → Account API Tokens → Create Token**.
+   Scope it to that account's Workers. Initial creation of a new Worker requires
+   product-level **Workers Admin**; once `companion-builder-bridge` exists, restrict
+   deployment access to **Editor** on that Worker and update this environment secret.
+   Editor can deploy and manage that Worker's secrets. Keep its original token secure.
+   See [Cloudflare's current permission guide](https://developers.cloudflare.com/workers/authorization/workers/).
+   The embedding token is not assumed to permit deployments. Do not change the account's billing plan.
 6. Generate two independent random strings (at least 32 random bytes each), retain
    them securely, and add **environment secrets** `BRIDGE_WEBHOOK_SECRET` and
    `BRIDGE_STATUS_TOKEN`. A password manager can generate these.
