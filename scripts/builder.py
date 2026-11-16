@@ -15,7 +15,7 @@ BUILDER = "AIOSCompanion/companion-builder"
 REPOSITORIES = ("aios-desktop-app", "aiosxaegra", "companion-memory")
 RELEASE_SECRETS = {"APPLE_API_KEY", "APPLE_API_KEY_ID", "APPLE_API_ISSUER", "CSC_LINK",
                    "CSC_KEY_PASSWORD", "DOTENV_PRODUCTION_B64", "SENTRY_AUTH_TOKEN",
-                   "CLOUDFLARE_AUTH_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "PUBLISH_RELEASES_TOKEN"}
+                   "PUBLISH_RELEASES_TOKEN"}
 
 
 def api(path, run=subprocess.run):

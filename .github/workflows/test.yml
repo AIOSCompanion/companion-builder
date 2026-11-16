@@ -22,6 +22,10 @@ on:
         description: Full 40-character head commit SHA of the PR
         required: true
         type: string
+      memory_sha:
+        description: Optional full memory commit for engine integration tests (defaults to resolved main)
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -82,7 +86,9 @@ jobs:
           app-id: ${{ vars.BUILDER_APP_ID }}
           private-key: ${{ secrets.BUILDER_APP_PRIVATE_KEY }}
           owner: AIOSCompanion
-          repositories: ${{ inputs.repository }}
+          repositories: |
+            ${{ inputs.repository }}
+            ${{ inputs.repository == 'aiosxaegra' && 'companion-memory' || '' }}
           permission-contents: read
 
       - name: Check out the PR head into pr/ (contents read only)
@@ -92,6 +98,24 @@ jobs:
           ref: ${{ inputs.head_sha }}
           token: ${{ steps.checkout-token.outputs.token }}
           path: pr
+          persist-credentials: false
+
+      - name: Resolve the engine memory dependency to an immutable commit
+        if: matrix.repo == 'aiosxaegra'
+        id: memory-dependency
+        env:
+          GH_TOKEN: ${{ steps.checkout-token.outputs.token }}
+          MEMORY_SHA: ${{ inputs.memory_sha }}
+        run: python3 -I -B "$RUNNER_TEMP/trusted/resolve_memory_dependency.py"
+
+      - name: Check out the pinned memory dependency beside the engine
+        if: matrix.repo == 'aiosxaegra'
+        uses: actions/checkout@v4
+        with:
+          repository: AIOSCompanion/companion-memory
+          ref: ${{ steps.memory-dependency.outputs.sha }}
+          token: ${{ steps.checkout-token.outputs.token }}
+          path: dependency-memory
           persist-credentials: false
 
       - name: Import the team's public log key (a variable, not a secret)
@@ -116,6 +140,10 @@ jobs:
 
       - name: Create the untrusted test user and hand it the PR checkout
         run: python3 -I -B "$RUNNER_TEMP/trusted/prepare_untrusted.py" --user pr-tests --checkout pr --home "$HOME"
+
+      - name: Hand the engine memory dependency to the same test user
+        if: matrix.repo == 'aiosxaegra'
+        run: python3 -I -B "$RUNNER_TEMP/trusted/prepare_untrusted.py" --user pr-tests --checkout dependency-memory --home "$HOME"
 
       # The PR's install runs as the test user: it keeps egress (the only step that may fetch packages), and its
       # output is sealed. It cannot write the trusted scripts or read this process's environment.

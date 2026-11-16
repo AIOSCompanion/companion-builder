@@ -352,8 +352,6 @@ jobs:
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           GH_TOKEN: ${{ secrets.PUBLISH_RELEASES_TOKEN }}
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-          CLOUDFLARE_AUTH_TOKEN: ${{ secrets.CLOUDFLARE_AUTH_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           PACKAGE_SCRIPT: release:mac-arm64
           ROW_TIMEOUT_SECONDS: 4500
           RELEASE_TIMING_FILE: ${{ runner.temp }}/release-timing.json
@@ -515,8 +513,6 @@ jobs:
           GAMMA_API_KEY: companion-gamma-build-sentinel-20261015
           GH_TOKEN: ${{ secrets.PUBLISH_RELEASES_TOKEN }}
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-          CLOUDFLARE_AUTH_TOKEN: ${{ secrets.CLOUDFLARE_AUTH_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           PACKAGE_SCRIPT: release:win
           ROW_TIMEOUT_SECONDS: 4500
           RELEASE_TIMING_FILE: ${{ runner.temp }}/release-timing.json

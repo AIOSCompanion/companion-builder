@@ -18,7 +18,7 @@ import sys
 SUITES = {
     "aiosxaegra": [
         {"suite": "engine unit tests (pytest)", "repo": "aiosxaegra",
-         "setup": "pip install --quiet --user uv && uv sync --locked --extra voice-worker",
+         "setup": "pip install --quiet --user uv && uv sync --locked --extra voice-worker && uv export --locked --extra voice-worker --no-hashes --no-emit-project > /tmp/engine-constraints.txt && uv pip install --python .venv/bin/python --constraint /tmp/engine-constraints.txt ../dependency-memory",
          "run": ".venv/bin/python -m pytest tests/unit -q --tb=no -p no:cacheprovider --junitxml=junit.xml"},
     ],
     "companion-memory": [

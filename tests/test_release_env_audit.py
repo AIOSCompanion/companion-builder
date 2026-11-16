@@ -22,8 +22,6 @@ AUDITED = {
     "APPLE_API_ISSUER": "electron-builder reads APPLE_API_ISSUER (MacTargetHelper, API-key branch)",
     "GH_TOKEN": "D2: electron-builder publishes with it in this step",
     "SENTRY_AUTH_TOKEN": "read by @sentry/bundler-plugin-core 5.3.0 via the desktop Vite config",
-    "CLOUDFLARE_AUTH_TOKEN": "the desktop Vite config bakes it into the bundle",
-    "CLOUDFLARE_ACCOUNT_ID": "the desktop Vite config bakes it into the bundle",
     "PACKAGE_SCRIPT": "the package phase's npm script",
     "ROW_TIMEOUT_SECONDS": "the packaging retry budget",
     "RELEASE_TIMING_FILE": "the row's phase timing file",
