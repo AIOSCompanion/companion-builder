@@ -131,6 +131,8 @@ class SuiteRunnerTests(unittest.TestCase):
         self.assertIn("sudo", argv)
         self.assertIn("unshare", argv)
         self.assertIn("--net", argv)
+        self.assertIn("/usr/bin/timeout", argv)
+        self.assertIn("3300s", argv)
         inner = argv[-1]
         self.assertIn("runuser -u pr-tests", inner)
         self.assertIn("env -i", inner)
@@ -158,6 +160,22 @@ class SuiteRunnerTests(unittest.TestCase):
             code = run_suite.main(env=self.env(LOG_RECIPIENT=""), run=run)
         self.assertEqual(code, 2)
         self.assertEqual(ran, [])
+
+    def test_invalid_deadlines_refuse_before_running(self):
+        for value in ("0", "-1", "3301", "nonsense"):
+            ran=[]
+            with contextlib.redirect_stdout(io.StringIO()):
+                code=run_suite.main(env=self.env(SUITE_TIMEOUT_SECONDS=value),
+                                    run=lambda *a, **kw: ran.append(a))
+            self.assertEqual(code,2)
+            self.assertEqual(ran,[])
+
+    def test_timeout_stays_inside_sealer_and_outside_privileged_namespace(self):
+        args=run_suite.build_argv("python", "run_sealed.py", "fixture", "logs", "recipient", "sleep 9", "/bin", timeout_seconds=600)
+        self.assertLess(args.index("run_sealed.py"),args.index("/usr/bin/timeout"))
+        self.assertLess(args.index("sudo"),args.index("/usr/bin/timeout"))
+        self.assertLess(args.index("/usr/bin/timeout"),args.index("unshare"))
+        self.assertIn("600s",args)
 
 
 class PrepareTests(unittest.TestCase):

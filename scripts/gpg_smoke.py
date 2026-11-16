@@ -2,13 +2,17 @@
 from __future__ import annotations
 
 import io
+import contextlib
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
+import shlex
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from run_sealed import run_step, gpg_filename
 
 
@@ -52,6 +56,39 @@ def main():
                                     capture_output=True, check=False)
             if report.returncode or report.stdout != xml.encode():
                 raise RuntimeError("encrypted report did not round-trip")
+            if sys.platform == "linux":
+                timed = run_step("public-timeout", ["/usr/bin/timeout", "--signal=TERM", "--kill-after=2s", "1s",
+                                 sys.executable, "-c", "import time; print('public-timeout-marker', flush=True); time.sleep(30)"],
+                                 log_dir=logs, recipient="builder-public-self-check", gpg=(gpg,), out=summary)
+                opened = subprocess.run([gpg, "--batch", "--decrypt", str(logs / "public-timeout.log.gpg")],
+                                        capture_output=True, check=False)
+                if timed != 124 or opened.returncode or opened.stdout.strip() != b"public-timeout-marker":
+                    raise RuntimeError("timed-out output did not seal completely")
+                if "public-timeout-marker" in summary.getvalue():
+                    raise RuntimeError("timed-out output escaped the sealer")
+            if "--suite-guard" in sys.argv:
+                from run_suite import main as run_suite
+                # A detached helper deliberately retains stdout. Without the
+                # UID cleanup, the sealer waits for its 30-second sleep.
+                child = "import time; time.sleep(30)"
+                code = (f"import subprocess,sys; subprocess.Popen([sys.executable,'-c',{child!r}], "
+                        "start_new_session=True); print('public-orphan-marker',flush=True)")
+                started = time.monotonic()
+                def capture(argv, *, env, check):
+                    result = subprocess.run(argv, env=env, check=check, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                    summary.write(result.stdout.decode("utf-8", errors="replace"))
+                    return result
+                with contextlib.redirect_stdout(summary):
+                    guarded = run_suite(run=capture, env={**os.environ, "SUITE_NAME": "public-orphan-guard",
+                                            "TEST_COMMAND": shlex.join([sys.executable, "-c", code]),
+                                            "LOG_RECIPIENT": "builder-public-self-check", "SEALED_LOG_DIR": str(logs),
+                                            "SUITE_TIMEOUT_SECONDS": "5"})
+                opened = subprocess.run([gpg, "--batch", "--decrypt", str(logs / "public-orphan-guard.log.gpg")],
+                                        capture_output=True, check=False)
+                if guarded or time.monotonic() - started > 15 or opened.returncode or opened.stdout.strip() != b"public-orphan-marker":
+                    raise RuntimeError("detached test helper prevented clean suite shutdown")
+                if "public-orphan-marker" in summary.getvalue():
+                    raise RuntimeError("detached helper output escaped the sealer")
             print("gpg smoke: sealed output round-trips; public summary does not contain child output")
             return 0
         except RuntimeError as error:
