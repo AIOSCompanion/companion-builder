@@ -15,6 +15,12 @@ def deploy(env, run=subprocess.run):
         raise ValueError("Missing configuration: " + ", ".join(missing))
     if not env["BRIDGE_APP_ID"].isdigit() or env.get("BRIDGE_ENABLED") not in ("true", "false"):
         raise ValueError("Invalid app ID or enable flag")
+    audit_env = {k: v for k, v in env.items() if k not in REQUIRED}
+    audit_env.update({name: env[name] for name in ("BRIDGE_APP_ID", "BRIDGE_APP_PRIVATE_KEY")})
+    audit = run(["node", str(Path(__file__).resolve().parents[1] / "bridge/audit-app.mjs")],
+                env=audit_env, capture_output=True, text=True, check=False)
+    if audit.returncode:
+        raise RuntimeError("Dispatch App must have Actions write and access only the public builder; deployment refused")
     # Only deployment credentials reach Wrangler. App/webhook/status keys go through stdin.
     clean_env = {k: v for k, v in env.items() if k not in (
         "BRIDGE_APP_PRIVATE_KEY", "BRIDGE_WEBHOOK_SECRET", "BRIDGE_STATUS_TOKEN")}

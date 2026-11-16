@@ -54,6 +54,7 @@ jobs:
 
   suite:
     name: ${{ matrix.suite }}
+    environment: source-access
     needs: plan
     strategy:
       fail-fast: false
@@ -169,6 +170,7 @@ jobs:
 
   status:
     name: Post the status to the private PR head
+    environment: source-access
     needs: [plan, suite]
     if: always() && needs.plan.result == 'success'
     runs-on: ubuntu-latest

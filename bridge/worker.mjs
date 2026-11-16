@@ -72,7 +72,7 @@ export async function appJWT(id, pem, now = Date.now()) {
   return `${data}.${base64url(await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, encoder.encode(data)))}`;
 }
 
-async function github(path, token, body, request = fetch) {
+export async function github(path, token, body, request = fetch) {
   const response = await request(`https://api.github.com/${path}`, {
     method: body === undefined ? "GET" : "POST",
     headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json",
@@ -96,7 +96,11 @@ export async function installationToken(env, repository, permissions, request = 
 export async function dispatch(job, token, request = fetch) {
   if (!SOURCES.has(job.repo)) throw new Error("unknown repository");
   let workflow, inputs;
-  if (job.tag) {
+  if (job.expand) {
+    if (!SHA.test(job.before) || !SHA.test(job.after)) throw new Error("invalid catch-up range");
+    workflow = "catch-up.yml";
+    inputs = { repository: job.repo, before_sha: job.before, head_sha: job.after };
+  } else if (job.tag) {
     if (job.repo !== "aios-desktop-app" || !VERSION.test(job.tag) || !SHA.test(job.after)) throw new Error("invalid release");
     workflow = "release.yml";
     inputs = { tag: job.tag, expected_sha: job.after };
@@ -142,21 +146,14 @@ export class Delivery {
     try {
       if (this.env.BRIDGE_ENABLED !== "true") throw new Error("bridge disabled");
       if (state.expand) {
-        const token = await installationToken(this.env, state.repo, { contents: "read" });
-        // Pagination is checkpointed. New branches have no comparison base, so enumerate
-        // their reachable history; extra old commits are preferable to dropped new commits.
-        const path = state.before === ZERO ?
-          `repos/${OWNER}/${state.repo}/commits?sha=${state.after}&per_page=100&page=${state.page}` :
-          `repos/${OWNER}/${state.repo}/compare/${state.before}...${state.after}?per_page=100&page=${state.page}`;
-        const result = await github(path, token);
-        const commits = Array.isArray(result) ? result : result.commits;
-        if (!Array.isArray(commits) || commits.some(c => !SHA.test(c.sha))) throw new Error("invalid expansion");
-        // Store individual hashes separately: a push can exceed one storage value's size limit.
-        for (const commit of commits) await storage.put(`sha:${commit.sha}`, commit.sha);
-        state.page += 1;
-        if (commits.length < 100) state.expand = false;
+        // The running bridge holds only a builder-only dispatch App credential.
+        // Private history expansion happens in an owner-approved GitHub job.
+        const token = await installationToken(this.env, "companion-builder", { actions: "write" });
+        await dispatch(state, token);
+        delete state.commits;
+        state.done = true;
+        state.index = 1;
         await storage.put("state", state);
-        await storage.setAlarm(Date.now() + 1000);
         return;
       }
       if (!state.jobsReady) {

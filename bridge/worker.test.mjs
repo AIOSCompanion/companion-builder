@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHmac, generateKeyPairSync, createVerify } from "node:crypto";
 import worker, { envelope, verifySignature, appJWT, dispatch, Delivery } from "./worker.mjs";
+import { auditDispatchApp } from "./audit-app.mjs";
 
 const a = "a".repeat(40), b = "b".repeat(40), zero = "0".repeat(40);
 const repository = { owner: { login: "AIOSCompanion" }, name: "aios-desktop-app",
@@ -9,6 +10,25 @@ const repository = { owner: { login: "AIOSCompanion" }, name: "aios-desktop-app"
 const push = { repository, ref: "refs/heads/main", after: b, before: a, commits: [{ id: a }, { id: b }] };
 const delivery = "11111111-2222-3333-4444-555555555555";
 const secret = "synthetic-webhook-secret-only";
+
+test("deploy scope audit rejects a private-source-capable or broadly installed bridge App", async () => {
+  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const env = { BRIDGE_APP_ID: "12345", BRIDGE_APP_PRIVATE_KEY: privateKey.export({ type: "pkcs1", format: "pem" }) };
+  let extraPermission = false, extraRepo = false;
+  const request = async url => {
+    if (url.endsWith("/app")) return Response.json({ permissions: { actions: "write", ...(extraPermission ? { contents: "read" } : {}) } });
+    if (url.includes("/app/installations?")) return Response.json([{ id: 987, account: { login: "AIOSCompanion" }, repository_selection: "selected" }]);
+    if (url.endsWith("/access_tokens")) return Response.json({ token: "synthetic-token" });
+    if (url.includes("/installation/repositories?")) return Response.json({ total_count: extraRepo ? 2 : 1,
+      repositories: [{ full_name: "AIOSCompanion/companion-builder" }] });
+    throw new Error("unexpected request");
+  };
+  await auditDispatchApp(env, request);
+  extraPermission = true;
+  await assert.rejects(auditDispatchApp(env, request));
+  extraPermission = false; extraRepo = true;
+  await assert.rejects(auditDispatchApp(env, request));
+});
 
 test("HMAC validation uses the exact body; rejects tampering and absent signatures", async () => {
   const body = new TextEncoder().encode('synthetic ü');
@@ -152,22 +172,22 @@ test("alarm dispatches every commit and resumes after GitHub failure without los
   assert.deepEqual(dispatched, [a, b]);
 });
 
-test("large pushes checkpoint pagination and dispatch hashes beyond the webhook's truncated list", async t => {
+test("large pushes delegate private history expansion to an approved builder job", async t => {
   const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
   const storage = new Storage();
   const env = { BRIDGE_ENABLED: "true", BRIDGE_APP_ID: "12345",
     BRIDGE_APP_PRIVATE_KEY: privateKey.export({ type: "pkcs8", format: "pem" }) };
   const object = new Delivery({ storage }, env);
-  const extra = "c".repeat(40), seen = [];
+  const seen = [];
   t.mock.method(globalThis, "fetch", async (url, options) => {
-    if (url.endsWith("/installation")) return Response.json({ id: 987 });
-    if (url.endsWith("/access_tokens")) return Response.json({ token: "synthetic-token" });
-    if (url.includes("/compare/")) {
-      assert.ok(url.endsWith("per_page=100&page=2"));
-      return Response.json({ commits: [{ sha: extra }] });
+    if (url.endsWith("/installation")) {
+      assert.ok(url.includes("/companion-builder/"));
+      return Response.json({ id: 987 });
     }
+    if (url.endsWith("/access_tokens")) return Response.json({ token: "synthetic-token" });
     if (url.endsWith("/dispatches")) {
-      seen.push(JSON.parse(options.body).inputs.head_sha);
+      assert.ok(url.endsWith("/catch-up.yml/dispatches"));
+      seen.push(JSON.parse(options.body));
       return new Response(null, { status: 204 });
     }
     throw new Error("unexpected request");
@@ -175,9 +195,8 @@ test("large pushes checkpoint pagination and dispatch hashes beyond the webhook'
   await storage.put("state", { repo: repository.name, commits: [a, b], before: a, after: b,
     expand: true, page: 2, index: 0 });
   await object.alarm();
-  assert.equal((await storage.get("state")).page, 3);
-  assert.equal((await storage.get("state")).expand, false);
-  await object.alarm();
-  assert.deepEqual(seen.sort(), [a, b, extra]);
+  assert.deepEqual(seen, [{ ref: "main", inputs: { repository: repository.name, before_sha: a, head_sha: b } }]);
   assert.equal((await storage.get("state")).done, true);
+  await object.alarm();
+  assert.equal(seen.length, 1);
 });

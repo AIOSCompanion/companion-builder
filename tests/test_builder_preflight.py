@@ -89,7 +89,7 @@ class BuilderTests(unittest.TestCase):
 
     def test_missing_test_credentials_are_reported_before_dispatch(self):
         missing = builder.missing_configuration("test", (), ())
-        self.assertIn("secret:BUILDER_APP_PRIVATE_KEY", missing)
+        self.assertIn("environment-secret:source-access/BUILDER_APP_PRIVATE_KEY", missing)
         self.assertIn("variable:TEST_LOG_PUBLIC_KEY", missing)
 
     def test_release_requires_reviewer_and_the_builder_main_branch_not_input_tags(self):
@@ -97,14 +97,46 @@ class BuilderTests(unittest.TestCase):
         environment = {"protection_rules": [{"type": "required_reviewers", "reviewers": [{"type": "User"}]}],
                        "deployment_branch_policy": {"protected_branches": False, "custom_branch_policies": True}}
         good = [{"name": "main", "type": "branch"}]
-        self.assertEqual(builder.missing_configuration("release", variables, {"BUILDER_APP_PRIVATE_KEY"},
-                         environment, good, builder.RELEASE_SECRETS), [])
+        env_secrets = builder.RELEASE_SECRETS | {"BUILDER_APP_PRIVATE_KEY"}
+        self.assertEqual(builder.missing_configuration("release", variables, (),
+                         environment, good, env_secrets), [])
         for wrong in ([{"name": "v*", "type": "tag"}], good + [{"name": "*", "type": "branch"}]):
             self.assertIn("environment:main-only-branch-rule", builder.missing_configuration("release", variables,
-                          {"BUILDER_APP_PRIVATE_KEY"}, environment, wrong, builder.RELEASE_SECRETS))
+                          (), environment, wrong, env_secrets))
         environment["protection_rules"] = []
         self.assertIn("environment:required-reviewer", builder.missing_configuration("release", variables,
-                      {"BUILDER_APP_PRIVATE_KEY"}, environment, good, builder.RELEASE_SECRETS))
+                      (), environment, good, env_secrets))
+
+    def test_private_app_key_can_only_be_read_by_approved_source_or_release_jobs(self):
+        consumers = []
+        for path in (ROOT / ".github/workflows").glob("*.yml"):
+            for name, job in yaml.safe_load(path.read_text())["jobs"].items():
+                if "BUILDER_APP_PRIVATE_KEY" in str(job):
+                    consumers.append((path.name, name))
+                    self.assertIn(job.get("environment"), ("source-access", "release-signing"),
+                                  f"{path.name}/{name} exposes private-source access without its approval gate")
+        self.assertIn(("release.yml", "identity"), consumers)
+        self.assertIn(("test.yml", "suite"), consumers)
+        self.assertIn(("test.yml", "status"), consumers)
+        self.assertIn(("catch-up.yml", "expand"), consumers)
+        bridge = (ROOT / ".github/workflows/bridge-deploy.yml").read_text()
+        self.assertNotIn("secrets.BUILDER_APP_PRIVATE_KEY", bridge)
+        self.assertIn("secrets.BRIDGE_APP_PRIVATE_KEY", bridge)
+
+    def test_preflight_rejects_an_unprotected_repository_key_even_when_environment_key_exists(self):
+        missing = builder.missing_configuration("test", (), {"BUILDER_APP_PRIVATE_KEY"},
+                                               environment_secrets={"BUILDER_APP_PRIVATE_KEY"})
+        self.assertIn("unsafe-repository-secret:BUILDER_APP_PRIVATE_KEY", missing)
+
+    def test_configuration_uploads_the_source_key_only_to_the_two_approved_environments(self):
+        calls = []
+        def run(args, **kwargs):
+            calls.append((args, kwargs))
+            return subprocess.CompletedProcess(args, 0)
+        configure.set_app_key("synthetic-value", run=run)
+        self.assertEqual({args[args.index("--env") + 1] for args, _ in calls},
+                         {"source-access", "release-signing"})
+        self.assertTrue(all(kwargs["input"] == "synthetic-value" for _, kwargs in calls))
 
     def test_release_pins_come_from_the_selected_release_and_conflicts_fail_closed(self):
         document = {"jobs": {"source": {"steps": [{"env": {"EXPECTED_AEGRA_SHA": "a" * 40,

@@ -1,6 +1,6 @@
 # Private events to the public builder
 
-This Worker receives signed GitHub App webhooks. Builds and tests execute only in
+This Worker receives signed repository webhooks. Builds and tests execute only in
 `AIOSCompanion/companion-builder` on hosted GitHub runners. The Worker does not build
 anything or check out product source.
 
@@ -14,14 +14,15 @@ anything or check out product source.
   object SHA accompanies the request. The workflow validates that identity, peels
   annotated tags and checks out the resulting immutable commit. Moved version tags
   are refused.
-- Release signing retains the `release-signing` owner approval. The release
+- Private-source tests/statuses and large-push expansion require `source-access`
+  owner approval. Release identity and signing require `release-signing` approval. The release
   workflow produces and verifies a draft; it does not automatically publish it.
 
 The receiver authenticates the exact raw body using WebCrypto HMAC verification,
 checks the organization/repository allowlist and drops private metadata before
 storing a delivery. Durable Objects retain the minimal delivery and retry GitHub
-failures. Push payloads at GitHub's 2048-commit limit trigger paginated commit
-expansion, checkpointed between requests. A new branch at that limit can run tests
+failures. Push payloads at GitHub's 2048-commit limit dispatch `catch-up.yml`, which
+reads private commit pages only after `source-access` approval. A new branch at that limit can run tests
 on older reachable history too, because it has no previous branch SHA.
 
 The same delivery ID is deduplicated. GitHub dispatch has no idempotency key: a
@@ -37,23 +38,26 @@ private desktop repository; creating this bridge does not replace them. GitHub
 cannot copy or reveal saved secret values across repositories. They still need to
 be populated in the builder environment from the maintained originals.
 
-The dedicated builder GitHub App must be installed on the three source repositories,
-the releases repository **and the builder repository**. Set these repository
-permissions: Contents read, Commit statuses write, Pull requests read, Actions write.
-The bridge mints an Actions-write token scoped **only to the builder**; checkout and
-status jobs continue requesting their smaller permissions separately. Private repo
-Actions remain disabled.
+Use two distinct GitHub Apps. The private-source reader App has Contents read and
+Commit statuses write on the three source repositories and releases repository.
+Its `BUILDER_APP_PRIVATE_KEY` is held only in protected `source-access` and
+`release-signing` environments; no repository or organization copy may be available
+to this builder. Every job that mints its token requires approval.
 
-In the App settings, enable a webhook at the deployed Worker's `/webhook` URL,
-set a strong webhook secret and subscribe to **Push** and **Pull request** events.
+The separate bridge dispatch App has Actions write and is installed **only on
+companion-builder**. Its private key cannot grant access to the private source
+repositories and must never be the reader App's key. Private repo Actions remain disabled.
+
+In each private repository's Settings → Webhooks, configure the deployed Worker's
+`/webhook` URL, a shared strong webhook secret and **Push** and **Pull request** events.
 Do not create an unsigned repository-dispatch endpoint or put a broad personal
 token into the Worker.
 
 Create a protected `bridge-deploy` GitHub environment with Alamin as reviewer and
 the builder `main` branch allowed. Configuration used by `bridge-deploy.yml`:
 
-- Repository variable `BUILDER_APP_ID` and secret `BUILDER_APP_PRIVATE_KEY`, also
-  used by the build workflows.
+- Environment variable `BRIDGE_APP_ID` and secret `BRIDGE_APP_PRIVATE_KEY` for the
+  separate builder-only dispatch App. Do not use the source reader App here.
 - Environment variable `BRIDGE_CLOUDFLARE_ACCOUNT_ID`.
 - Environment secret `BRIDGE_CLOUDFLARE_API_TOKEN`, scoped to deploy this Worker and
   its Durable Object namespace. Do not assume the existing embeddings token has
@@ -82,7 +86,8 @@ plans or establish a spending cap. Deployment and hosted event acceptance are
 2. Deploy disabled, configure the App webhook and verify its signed ping after
    enabling acceptance.
 3. Push a two-commit throwaway branch to a private source repo: both SHAs get real
-   builder test runs and private commit statuses; inspect decrypted logs locally.
+   builder test runs and private commit statuses after source-access approval;
+   inspect decrypted logs locally.
 4. Open/update its same-repo PR and merge an approved change to main: verify the
    respective heads get test runs, with no private Actions run.
 5. Create a reviewed test version tag matching the package version; approve the

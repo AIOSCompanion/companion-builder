@@ -21,14 +21,16 @@ class BridgeDeploymentTests(unittest.TestCase):
             calls.append((args, kw))
             return subprocess.CompletedProcess(args, 0)
         deploy_bridge.deploy(env, run)
-        self.assertIn("BRIDGE_ENABLED:false", calls[0][0])
+        self.assertEqual(calls[0][0][0], "node")
+        self.assertNotIn("CLOUDFLARE_API_TOKEN", calls[0][1]["env"])
+        self.assertIn("BRIDGE_ENABLED:false", calls[1][0])
         self.assertIn("BRIDGE_ENABLED:true", calls[-1][0])
-        for args, kwargs in calls:
+        for args, kwargs in calls[1:]:
             for name in ("BRIDGE_APP_PRIVATE_KEY", "BRIDGE_WEBHOOK_SECRET", "BRIDGE_STATUS_TOKEN"):
                 self.assertNotIn(env[name], args)
                 self.assertNotIn(name, kwargs["env"])
             self.assertTrue(kwargs["capture_output"])
-        self.assertEqual([kw["input"] for _, kw in calls[1:4]], [env[n] for n in (
+        self.assertEqual([kw["input"] for _, kw in calls[2:5]], [env[n] for n in (
             "BRIDGE_APP_PRIVATE_KEY", "BRIDGE_WEBHOOK_SECRET", "BRIDGE_STATUS_TOKEN")])
 
     def test_failed_secret_upload_cannot_enable_the_worker(self):
@@ -41,3 +43,15 @@ class BridgeDeploymentTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             deploy_bridge.deploy(env, run)
         self.assertFalse(any("BRIDGE_ENABLED:true" in args for args in calls))
+
+    def test_a_failed_app_scope_audit_prevents_any_worker_upload(self):
+        env = {name: "synthetic" for name in deploy_bridge.REQUIRED}
+        env.update(BRIDGE_APP_ID="12345", BRIDGE_ENABLED="true")
+        calls = []
+        def run(args, **kwargs):
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 1)
+        with self.assertRaises(RuntimeError):
+            deploy_bridge.deploy(env, run)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], "node")
