@@ -3,7 +3,8 @@
 Use this repository for Companion GitHub CI and release builds. Product source stays private.
 
 - Use `python scripts/builder.py test <repository> <full-sha>` and `python scripts/builder.py release <version-tag>`.
-- Run `python scripts/builder.py doctor --mode test` or `--mode release` before private-source work. Missing credentials are a configuration blocker, not permission to run private Actions instead.
+  The Go/Wails app releases with `python scripts/builder.py release-app <companion-engine-version-tag>`.
+- Run `python scripts/builder.py doctor --mode test`, `--mode release` or `--mode release-app` before private-source work. Missing credentials are a configuration blocker, not permission to run private Actions instead.
 - Use `self-check.yml` for changes to this public builder. It needs no private-source or signing credentials.
 - Automatic source push/PR/tag routing lives in `bridge/`. Deploy it only through this repo's
   `bridge-deploy.yml`, after its own configuration and review. Keep delivery metadata private,

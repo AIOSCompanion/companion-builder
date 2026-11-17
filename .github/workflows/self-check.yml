@@ -84,3 +84,39 @@ jobs:
           python-version: '3.12'
       - name: Verify real encryption without private data or persistent keys
         run: python scripts/gpg_smoke.py
+
+  app-release-snapshot:
+    name: Protect release snapshot on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Calibrate trusted-script protection using public synthetic files only
+        run: python -I -B scripts/app_snapshot_smoke.py
+
+  app-release-runner:
+    name: Calibrate app release checks on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Prove the packaged-window and macOS archive checks with known-good and negative controls
+        run: python -I -B scripts/app_runner_calibration.py
