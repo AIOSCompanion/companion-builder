@@ -34,7 +34,7 @@ class BridgeProxyTests(unittest.TestCase):
             target.write_text(self.SITE)
             snippet = mapped('/etc/nginx/snippets/companion-builder-bridge.conf')
             snippet.parent.mkdir(parents=True)
-            mapped('/var/lib/companion-builder-bridge').mkdir(parents=True)
+            mapped('/var/backups').mkdir(parents=True)
             commands = []
             def run(args, **kwargs):
                 commands.append(args)
@@ -48,4 +48,5 @@ class BridgeProxyTests(unittest.TestCase):
                                                      BRIDGE_PUBLIC_HOST='existing.example.com'))
             self.assertEqual(target.read_text(), self.SITE)
             self.assertFalse(snippet.exists())
+            self.assertEqual(len(list(mapped('/var/backups/companion-builder-bridge').glob('*.conf'))), 1)
             self.assertEqual(commands, [['nginx', '-t'], ['nginx', '-t'], ['systemctl', 'reload', 'nginx']])
