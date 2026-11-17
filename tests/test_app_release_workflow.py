@@ -57,10 +57,40 @@ class AppWorkflowTests(unittest.TestCase):
         self.assertEqual(rows, [{"platform": "windows-amd64", "os": "windows-2022"},
                                 {"platform": "darwin-arm64", "os": "macos-15"}])
         self.assertEqual(WORKFLOW["jobs"]["finalize"]["needs"], ["identity", "build"])
-        setup = next(step for step in build["steps"] if step.get("uses") == "actions/setup-go@v5")
-        self.assertEqual(setup["with"]["go-version"], "1.27.4")
-        self.assertFalse(setup["with"]["cache"])
         self.assertNotIn("self-hosted", str(WORKFLOW))
+
+    def test_go_is_pinned_by_the_sources_go_mod_and_node_comes_from_the_uis_engines(self):
+        steps = WORKFLOW["jobs"]["build"]["steps"]
+        names = [step.get("name") or step.get("uses") for step in steps]
+        resolved = next(step for step in steps if step.get("id") == "toolchain")
+        self.assertIn("--export-output go_version --export-output node_version", resolved["run"])
+        self.assertTrue(resolved["run"].endswith("app_release.py\" toolchain"))
+        go = next(step for step in steps if step.get("uses") == "actions/setup-go@v5")
+        node = next(step for step in steps if step.get("uses") == "actions/setup-node@v4")
+        self.assertEqual(go["with"], {"go-version": "${{ steps.toolchain.outputs.go_version }}", "cache": False})
+        self.assertEqual(node["with"], {"node-version": "${{ steps.toolchain.outputs.node_version }}"})
+        checkout = names.index("Check out private source at the validated immutable commit")
+        preflight = names.index("Recheck the checkout, exact tag and toolchain before building")
+        self.assertLess(checkout, steps.index(resolved))
+        self.assertLess(steps.index(resolved), steps.index(go))
+        self.assertLess(steps.index(node), preflight)
+        self.assertLess(preflight, names.index("Build without publisher or signing credentials"))
+        self.assertEqual(WORKFLOW["jobs"]["build"]["env"]["GOTOOLCHAIN"], "local")
+
+    def test_one_builder_variable_names_the_destination_and_todays_repositories_never_appear(self):
+        text = (ROOT / ".github/workflows/release-app.yml").read_text()
+        self.assertEqual(text.count("vars.APP_RELEASE_REPOSITORY"), 1)
+        self.assertNotIn("APP_RELEASE_REPOSITORY_ID", text)
+        identity = WORKFLOW["jobs"]["identity"]["steps"]
+        reader = next(step for step in identity if step.get("id") == "identity")
+        self.assertEqual(reader["env"]["APP_RELEASE_REPOSITORY"], "${{ vars.APP_RELEASE_REPOSITORY }}")
+        for name in ("aios-companion-releases", "aios-desktop-app", "aiosxaegra", "companion-memory"):
+            self.assertNotIn(name, text)
+
+    def test_dispatch_inputs_never_become_shell_text(self):
+        for job in WORKFLOW["jobs"].values():
+            for step in job["steps"]:
+                self.assertNotIn("inputs.", step.get("run", ""), step.get("name"))
 
     def test_runner_paths_are_evaluated_in_step_context_not_invalid_job_environment(self):
         for job in WORKFLOW["jobs"].values():

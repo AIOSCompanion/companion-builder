@@ -36,7 +36,6 @@ jobs:
       commit_sha: ${{ steps.identity.outputs.commit_sha }}
       tag_object_sha: ${{ steps.identity.outputs.tag_object_sha }}
       release_repository: ${{ steps.identity.outputs.release_repository }}
-      release_repository_id: ${{ steps.identity.outputs.release_repository_id }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -54,14 +53,14 @@ jobs:
           owner: AIOSCompanion
           repositories: companion-engine
           permission-contents: read
-      - name: Verify the immutable source tag and explicitly configured public destination
+      # The destination is one builder variable, so the owner's choice of repository is a single setting.
+      - name: Verify the immutable source tag and the configured public destination
         id: identity
         env:
           GH_TOKEN: ${{ steps.source-token.outputs.token }}
           TAG: ${{ inputs.tag }}
           EXPECTED_SHA: ${{ inputs.expected_sha }}
           APP_RELEASE_REPOSITORY: ${{ vars.APP_RELEASE_REPOSITORY }}
-          APP_RELEASE_REPOSITORY_ID: ${{ vars.APP_RELEASE_REPOSITORY_ID }}
         run: python3 -I -B scripts/app_release_identity.py
       - name: Create or verify the isolated unpublished draft
         env:
@@ -69,7 +68,6 @@ jobs:
           TAG: ${{ inputs.tag }}
           SOURCE_SHA: ${{ steps.identity.outputs.commit_sha }}
           APP_RELEASE_REPOSITORY: ${{ steps.identity.outputs.release_repository }}
-          APP_RELEASE_REPOSITORY_ID: ${{ steps.identity.outputs.release_repository_id }}
           UNSIGNED_MACOS_TEST: ${{ inputs.allow_unsigned_macos_test }}
           LOG_RECIPIENT: ${{ vars.TEST_LOG_RECIPIENT }}
         run: >-
@@ -139,14 +137,21 @@ jobs:
           python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name checkout-private-app
           --log-dir "$RUNNER_TEMP/app-release-logs" --
           python -I -B "$RUNNER_TEMP/trusted/app_release.py" checkout
+      # Go is pinned by the source's go.mod (toolchain line, else go line); Node comes from the UI's engines.
+      - name: Read the Go and Node versions the pinned source asks for
+        id: toolchain
+        run: >-
+          python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name app-toolchain
+          --log-dir "$RUNNER_TEMP/app-release-logs" --export-output go_version --export-output node_version --
+          python -I -B "$RUNNER_TEMP/trusted/app_release.py" toolchain
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.27.4'
+          go-version: ${{ steps.toolchain.outputs.go_version }}
           cache: false
       - uses: actions/setup-node@v4
         with:
-          node-version: '22.23.4'
-      - name: Recheck the checkout and exact tag before building
+          node-version: ${{ steps.toolchain.outputs.node_version }}
+      - name: Recheck the checkout, exact tag and toolchain before building
         run: >-
           python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name app-source-preflight
           --log-dir "$RUNNER_TEMP/app-release-logs" --
@@ -194,7 +199,6 @@ jobs:
           APP_ASSET_DIR: ${{ runner.temp }}/app-release-assets
           GH_TOKEN: ${{ secrets.PUBLISH_RELEASES_TOKEN }}
           APP_RELEASE_REPOSITORY: ${{ needs.identity.outputs.release_repository }}
-          APP_RELEASE_REPOSITORY_ID: ${{ needs.identity.outputs.release_repository_id }}
         run: >-
           python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name upload-app-assets
           --log-dir "$RUNNER_TEMP/app-release-logs" --
@@ -230,7 +234,6 @@ jobs:
           TAG: ${{ inputs.tag }}
           SOURCE_SHA: ${{ needs.identity.outputs.commit_sha }}
           APP_RELEASE_REPOSITORY: ${{ needs.identity.outputs.release_repository }}
-          APP_RELEASE_REPOSITORY_ID: ${{ needs.identity.outputs.release_repository_id }}
           UNSIGNED_MACOS_TEST: ${{ inputs.allow_unsigned_macos_test }}
           LOG_RECIPIENT: ${{ vars.TEST_LOG_RECIPIENT }}
         run: >-

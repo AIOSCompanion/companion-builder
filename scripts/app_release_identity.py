@@ -1,4 +1,11 @@
-"""Bind the new app's private source tag to its explicitly configured public destination."""
+"""Bind the new app's private source tag to its configured public destination.
+
+The destination is one builder variable, APP_RELEASE_REPOSITORY ("AIOSCompanion/<name>"), so the owner's
+choice of name is a single setting. It is checked twice: here, before any private checkout, as configuration
+only (this job's App token is scoped to companion-engine and is not used on the destination); and by every
+publishing step, with the publishing credential, against GitHub's own metadata, where today's updater
+repository and the builder's other repositories are refused by immutable ID as well as by name.
+"""
 import json
 import os
 from pathlib import Path
@@ -13,26 +20,37 @@ SOURCE = "AIOSCompanion/companion-engine"
 FORBIDDEN_TARGETS = frozenset((SOURCE, "AIOSCompanion/aios-companion-releases",
     "AIOSCompanion/aios-desktop-app", "AIOSCompanion/companion-builder",
     "AIOSCompanion/aiosxaegra", "AIOSCompanion/companion-memory"))
-FORBIDDEN_IDS = frozenset(("1025431750", "1458662787", "1461476177"))  # old updater, builder, source
+# Immutable IDs of the same repositories: today's updater feed (aios-companion-releases), the builder, the app's
+# source, today's app, the engine and memory. A rename cannot turn one of them into the app's destination.
+FORBIDDEN_IDS = frozenset(("1025431750", "1458662787", "1461476177", "1023819429", "1145765349", "1212522333"))
+DESTINATION = re.compile(r"AIOSCompanion/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}")
 
 
-def validate_destination(repository, repository_id, get):
-    """The owner configures both name and immutable ID; there is no default feed."""
-    if (not re.fullmatch(r"AIOSCompanion/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}", repository or "")
-            or repository in FORBIDDEN_TARGETS
-            or not re.fullmatch(r"[1-9][0-9]{0,19}", repository_id or "") or repository_id in FORBIDDEN_IDS):
+def validate_configuration(repository):
+    """The owner's configured destination, before any network access. There is no default."""
+    if (not DESTINATION.fullmatch(repository or "") or repository.endswith(".git")
+            or repository.lower() in {name.lower() for name in FORBIDDEN_TARGETS}):
         raise ValueError("a separate approved public release repository must be configured")
+    return repository
+
+
+def validate_destination(repository, get):
+    """GitHub's metadata for the destination, read with the publishing credential. Returns that metadata."""
+    validate_configuration(repository)
     metadata = get("repos/" + repository)
-    if (metadata.get("full_name") != repository or str(metadata.get("id")) != repository_id
+    if (metadata.get("full_name") != repository or str(metadata.get("id")) in FORBIDDEN_IDS
             or metadata.get("private") is not False or metadata.get("visibility") != "public"
             or metadata.get("archived") is not False or metadata.get("disabled") is not False
             or (metadata.get("owner") or {}).get("login") != "AIOSCompanion"):
         raise ValueError("release destination identity or visibility changed")
-    return repository
+    permissions = metadata.get("permissions")
+    if isinstance(permissions, dict) and permissions.get("push") is not True:
+        raise ValueError("the publishing credential cannot write to the release destination")
+    return metadata
 
 
-def identity(tag, expected, repository, repository_id, get):
-    target = validate_destination(repository, repository_id, get)
+def identity(tag, expected, repository, get):
+    target = validate_configuration(repository)
     original = {}
     def read(path):
         result = get(path)
@@ -40,8 +58,7 @@ def identity(tag, expected, repository, repository_id, get):
             original["sha"] = result["object"]["sha"]
         return result
     sha = resolve(tag, expected, read, repository=SOURCE)
-    return {"commit_sha": sha, "tag_object_sha": original["sha"],
-            "release_repository": target, "release_repository_id": repository_id}
+    return {"commit_sha": sha, "tag_object_sha": original["sha"], "release_repository": target}
 
 
 def github_get(path):
@@ -52,17 +69,18 @@ def github_get(path):
 
 
 def main():
+    # This step runs outside the sealed wrapper, so it prints fixed messages only.
     try:
         if (os.environ.get("GITHUB_REPOSITORY") != "AIOSCompanion/companion-builder"
                 or os.environ.get("GITHUB_REF") != "refs/heads/main"
                 or os.environ.get("GITHUB_EVENT_NAME") != "workflow_dispatch"):
             raise ValueError("new-app releases require a dispatch from builder main")
         result = identity(os.environ.get("TAG", ""), os.environ.get("EXPECTED_SHA", ""),
-            os.environ.get("APP_RELEASE_REPOSITORY", ""), os.environ.get("APP_RELEASE_REPOSITORY_ID", ""), github_get)
+            os.environ.get("APP_RELEASE_REPOSITORY", ""), github_get)
         with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8", newline="\n") as output:
             for key, value in result.items():
                 output.write(f"{key}={value}\n")
-        print("New-app source tag and separate public release destination verified")
+        print("New-app source tag and release destination configuration verified")
         return 0
     except Exception:
         print("New-app release identity rejected; configuration and response values withheld", file=sys.stderr)
