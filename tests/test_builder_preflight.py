@@ -75,10 +75,41 @@ class BuilderTests(unittest.TestCase):
 
     def test_dispatches_never_target_private_actions(self):
         for command, kwargs in [("test", {"repository": "aiosxaegra", "sha": "a" * 40}),
-                                ("release", {"tag": "v1.2.3"}), ("self-check", {})]:
+                                ("release", {"tag": "v1.2.3"}), ("release-app", {"tag": "v1.2.3"}), ("self-check", {})]:
             args = builder.dispatch_args(command, **kwargs)
             self.assertEqual(args[args.index("--repo") + 1], builder.BUILDER)
             self.assertEqual(args[args.index("--ref") + 1], "main")
+
+    def test_the_app_release_dispatches_its_own_workflow_with_an_explicit_signing_choice(self):
+        args = builder.dispatch_args("release-app", tag="v0.19.0")
+        self.assertEqual(args[3], "release-app.yml")
+        self.assertEqual(args[-4:], ["-f", "tag=v0.19.0", "-f", "allow_unsigned_macos_test=false"])
+        unsigned = builder.dispatch_args("release-app", tag="v0.19.0-rc.1", allow_unsigned_macos_test=True)
+        self.assertEqual(unsigned[-1], "allow_unsigned_macos_test=true")
+        for tag in ("main", "v0.19", "v0.19.0;echo nope", None):
+            with self.assertRaises(ValueError):
+                builder.dispatch_args("release-app", tag=tag)
+
+    def test_the_app_release_needs_its_destination_variable_and_signing_unless_explicitly_unsigned(self):
+        variables = {"BUILDER_APP_ID", "TEST_LOG_PUBLIC_KEY", "TEST_LOG_RECIPIENT"}
+        environment = {"protection_rules": [{"type": "required_reviewers", "reviewers": [{"type": "User"}]}],
+                       "deployment_branch_policy": {"protected_branches": False, "custom_branch_policies": True}}
+        good = [{"name": "main", "type": "branch"}]
+        present = builder.APP_SIGNING_SECRETS | builder.APP_RELEASE_SECRETS | {"BUILDER_APP_PRIVATE_KEY"}
+        self.assertEqual(builder.missing_configuration("release-app", variables, (), environment, good, present),
+                         ["variable:APP_RELEASE_REPOSITORY"])
+        ready = variables | {"APP_RELEASE_REPOSITORY"}
+        self.assertEqual(builder.missing_configuration("release-app", ready, (), environment, good, present), [])
+        # The Electron route's build inputs are not the app's; the app needs its own publish and signing secrets.
+        self.assertNotIn("DOTENV_PRODUCTION_B64", builder.APP_SIGNING_SECRETS | builder.APP_RELEASE_SECRETS)
+        without_password = present - {"CSC_KEY_PASSWORD"}
+        self.assertEqual(builder.missing_configuration("release-app", ready, (), environment, good, without_password),
+                         ["environment-secret:CSC_KEY_PASSWORD"])
+        minimal = builder.APP_RELEASE_SECRETS | {"BUILDER_APP_PRIVATE_KEY"}
+        self.assertEqual(builder.missing_configuration("release-app", ready, (), environment, good, minimal,
+                                                       unsigned_macos=True), [])
+        self.assertIn("environment-secret:PUBLISH_RELEASES_TOKEN", builder.missing_configuration(
+            "release-app", ready, (), environment, good, {"BUILDER_APP_PRIVATE_KEY"}, unsigned_macos=True))
 
     def test_a_branch_is_not_a_release_and_a_moving_ref_is_not_a_test_head(self):
         for tag in ("main", "v1.2", "v1.2.3;echo nope"):

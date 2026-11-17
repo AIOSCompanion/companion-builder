@@ -165,7 +165,11 @@ the final draft before relying on this route.
 5. For a signed macOS build: set `CSC_KEY_PASSWORD`, and have the Apple API key
    accepted (it answered 401 on 17 Nov 2026). Without them, only the explicit
    unsigned macOS test build can complete.
-6. Push the reviewed version tag to `companion-engine`, then run
-   `release-app.yml` from builder main with that tag and approve each
-   `release-signing` job. Decrypt the sealed logs locally if a step fails.
+6. `python scripts/builder.py doctor --mode release-app` must report
+   `ready: true` (it names missing settings, never values; it cannot see the App
+   installation or whether Apple accepts the key). Push the reviewed version tag to
+   `companion-engine`, run `python scripts/builder.py release-app <tag>` (add
+   `--allow-unsigned-macos-test` only for a labelled unsigned macOS test draft),
+   and approve each `release-signing` job. Decrypt the sealed logs locally if a
+   step fails.
 7. Review the draft's seven files and notes, then publish it by hand.

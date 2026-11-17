@@ -44,6 +44,8 @@ python scripts/builder.py test aios-desktop-app <desktop-sha> --engine-sha <engi
 python scripts/builder.py test aiosxaegra <engine-sha> --memory-sha <memory-sha> --diagnostic
 python scripts/builder.py doctor --mode release
 python scripts/builder.py release v1.2.3
+python scripts/builder.py doctor --mode release-app
+python scripts/builder.py release-app v0.19.0
 python scripts/builder.py self-check
 ```
 
@@ -89,7 +91,8 @@ Timeouts remain failures; diagnostic runs do not bypass the test or release gate
 - `release.yml`: release builds for a tag on the private repository. Dispatch only, from this repository's
   default branch, into the `release-signing` environment, which needs an approval.
 - `release-app.yml`: the separate Go/Wails app route for reviewed `companion-engine` tags. It requires
-  an explicitly configured, separate public artifact repository. Builds run without signing/publish
+  a separate public artifact repository, named by the one builder variable `APP_RELEASE_REPOSITORY`
+  (never today's `aios-companion-releases`). Builds run without signing/publish
   credentials; publication steps upload only allowlisted executables, ZIPs, checksums and receipts.
   Both native rows must pass before final draft verification. It always leaves an unpublished draft.
   See [the new app release contract](docs/APP_RELEASE.md) for configuration and outstanding acceptance gates.
