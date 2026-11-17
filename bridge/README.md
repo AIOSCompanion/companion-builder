@@ -50,6 +50,12 @@ The approved job creates a temporary SSH key, registers it with OS Login for
 key when finished. No reusable SSH private key is saved in GitHub. The host-access
 workflow verifies the same pinned host and administrative login before deployment.
 
+Use `runtime-inventory.yml` for a read-only inspection of existing containers,
+deployment markers and service state through this same approved path. It reports
+retired-provider environment field names, never their values, and excludes operation
+tokens and application data. Only encrypted inventory is retained. It does not
+stop containers, change configuration or execute private source.
+
 The existing Linux x64 target needs Python3, tar/xz, systemd and passwordless sudo
 for the trusted installer. It installs an isolated Node 22.23.4 runtime under the
 bridge directory, verifies the official archive against a committed SHA-256 before
