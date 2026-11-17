@@ -17,12 +17,27 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from validate_release_ref import resolve
 
 SOURCE = "AIOSCompanion/companion-engine"
-FORBIDDEN_TARGETS = frozenset((SOURCE, "AIOSCompanion/aios-companion-releases",
-    "AIOSCompanion/aios-desktop-app", "AIOSCompanion/companion-builder",
-    "AIOSCompanion/aiosxaegra", "AIOSCompanion/companion-memory"))
-# Immutable IDs of the same repositories: today's updater feed (aios-companion-releases), the builder, the app's
-# source, today's app, the engine and memory. A rename cannot turn one of them into the app's destination.
-FORBIDDEN_IDS = frozenset(("1025431750", "1458662787", "1461476177", "1023819429", "1145765349", "1212522333"))
+# Every other repository the organisation had on 17 Nov 2026 (14), by name and by immutable ID, so a rename cannot
+# turn one of them into the app's destination. Today's updater feed (aios-companion-releases) comes first; the only
+# repository left out is the app's own destination, companion-app-releases (1461828770).
+FORBIDDEN_REPOSITORIES = {
+    "AIOSCompanion/aios-companion-releases": "1025431750",
+    "AIOSCompanion/aios-desktop-app": "1023819429",
+    "AIOSCompanion/companion-builder": "1458662787",
+    SOURCE: "1461476177",
+    "AIOSCompanion/aiosxaegra": "1145765349",
+    "AIOSCompanion/companion-memory": "1212522333",
+    "AIOSCompanion/AIOSCompanion": "976654857",
+    "AIOSCompanion/AIOS_Commercial": "1008300374",
+    "AIOSCompanion/aios": "1389705388",
+    "AIOSCompanion/aios-langgraph-server": "1022520496",
+    "AIOSCompanion/aios-mobile": "1022530766",
+    "AIOSCompanion/companion-workspace-recovery": "1414764802",
+    "AIOSCompanion/real-ui-showreel": "1431594049",
+    "AIOSCompanion/test-repo-check": "1079973351",
+}
+FORBIDDEN_TARGETS = frozenset(FORBIDDEN_REPOSITORIES)
+FORBIDDEN_IDS = frozenset(FORBIDDEN_REPOSITORIES.values())
 DESTINATION = re.compile(r"AIOSCompanion/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}")
 
 

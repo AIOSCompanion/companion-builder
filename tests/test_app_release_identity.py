@@ -3,7 +3,8 @@ from pathlib import Path
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from app_release_identity import FORBIDDEN_IDS, FORBIDDEN_TARGETS, identity, validate_configuration, validate_destination
+from app_release_identity import (FORBIDDEN_IDS, FORBIDDEN_REPOSITORIES, FORBIDDEN_TARGETS, identity,
+                                  validate_configuration, validate_destination)
 
 
 class AppReleaseIdentityTests(unittest.TestCase):
@@ -42,6 +43,27 @@ class AppReleaseIdentityTests(unittest.TestCase):
             metadata = dict(self.metadata(), id=int(forbidden))
             with self.subTest(id=forbidden), self.assertRaises(ValueError):
                 validate_destination(self.TARGET, lambda _: metadata)
+
+    def test_every_other_organisation_repository_is_refused_by_name_and_id_but_the_app_destination_is_not(self):
+        # The organisation's 14 repositories on 17 Nov 2026, besides the app's destination (live, read-only).
+        self.assertEqual(len(FORBIDDEN_REPOSITORIES), 14)
+        self.assertEqual(len(FORBIDDEN_IDS), 14)
+        for name in ("AIOSCompanion/test-repo-check", "AIOSCompanion/AIOSCompanion", "AIOSCompanion/AIOS_Commercial",
+                     "AIOSCompanion/aios", "AIOSCompanion/aios-langgraph-server", "AIOSCompanion/aios-mobile",
+                     "AIOSCompanion/companion-workspace-recovery", "AIOSCompanion/real-ui-showreel"):
+            self.assertIn(name, FORBIDDEN_TARGETS)
+        for name, repository_id in FORBIDDEN_REPOSITORIES.items():
+            # Public and writable, as test-repo-check is public: refused by name and, under another name, by ID.
+            public = dict(self.metadata(), full_name=name, id=int(repository_id))
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                validate_destination(name, lambda _: public)
+            with self.subTest(name=name.upper()), self.assertRaises(ValueError):
+                validate_configuration(name.upper())
+            with self.subTest(id=repository_id), self.assertRaises(ValueError):
+                validate_destination(self.TARGET, lambda _: dict(self.metadata(), id=int(repository_id)))
+        destination = "AIOSCompanion/companion-app-releases"
+        metadata = dict(self.metadata(), full_name=destination, id=1461828770)
+        self.assertEqual(validate_destination(destination, lambda _: metadata)["id"], 1461828770)
 
     def test_visibility_identity_archived_and_unwritable_destinations_are_rejected(self):
         for key, value in [("full_name", "AIOSCompanion/renamed"), ("private", True), ("visibility", "private"),
