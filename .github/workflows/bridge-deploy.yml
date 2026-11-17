@@ -44,6 +44,7 @@ jobs:
           project_id: ${{ secrets.BRIDGE_GCP_PROJECT }}
       - name: Deploy the bridge without printing credentials or payloads
         env:
+          GCP_DEPLOY_SERVICE_ACCOUNT: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
           BRIDGE_GCP_PROJECT: ${{ secrets.BRIDGE_GCP_PROJECT }}
           BRIDGE_SSH_HOST: ${{ secrets.BRIDGE_SSH_HOST }}
           BRIDGE_SSH_KNOWN_HOSTS: ${{ secrets.BRIDGE_SSH_KNOWN_HOSTS }}
