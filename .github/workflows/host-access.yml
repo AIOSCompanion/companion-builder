@@ -1,0 +1,65 @@
+name: Inspect existing bridge host access
+
+# Read-only probe using the existing cloud identity. No private source checkout.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: bridge-deploy
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Import the public log key
+        env:
+          PUBLIC_LOG_KEY: ${{ vars.TEST_LOG_PUBLIC_KEY }}
+        run: printf '%s\n' "$PUBLIC_LOG_KEY" | gpg --batch --import >/dev/null 2>&1
+      - name: Install the cloud CLI before requesting short-lived credentials
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
+      - name: Authenticate with the existing deploy identity
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          project_id: ${{ secrets.BRIDGE_GCP_PROJECT }}
+      - name: Read the existing host metadata into a sealed report
+        env:
+          TARGET_PROJECT: ${{ secrets.BRIDGE_GCP_PROJECT }}
+          TARGET_ZONE: ${{ secrets.BRIDGE_GCP_ZONE }}
+          TARGET_INSTANCE: ${{ secrets.BRIDGE_GCP_INSTANCE }}
+          LOG_RECIPIENT: ${{ vars.TEST_LOG_RECIPIENT }}
+        run: >-
+          python3 -I -B scripts/run_sealed.py --name host-metadata
+          --log-dir "$RUNNER_TEMP/host-reports" --
+          gcloud compute instances describe "$TARGET_INSTANCE"
+          --project="$TARGET_PROJECT" --zone="$TARGET_ZONE"
+          --format='json(name,status,networkInterfaces,zone)' --quiet
+      - name: Read authenticated SSH host public keys into a sealed report
+        env:
+          TARGET_PROJECT: ${{ secrets.BRIDGE_GCP_PROJECT }}
+          TARGET_ZONE: ${{ secrets.BRIDGE_GCP_ZONE }}
+          TARGET_INSTANCE: ${{ secrets.BRIDGE_GCP_INSTANCE }}
+          LOG_RECIPIENT: ${{ vars.TEST_LOG_RECIPIENT }}
+        run: >-
+          python3 -I -B scripts/run_sealed.py --name host-public-keys
+          --log-dir "$RUNNER_TEMP/host-reports" --
+          gcloud compute instances get-guest-attributes "$TARGET_INSTANCE"
+          --project="$TARGET_PROJECT" --zone="$TARGET_ZONE"
+          --query-path=hostkeys/ --format=json --quiet
+      - name: Retain only encrypted probe reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sealed-host-access
+          path: ${{ runner.temp }}/host-reports/*.gpg
+          retention-days: 1
