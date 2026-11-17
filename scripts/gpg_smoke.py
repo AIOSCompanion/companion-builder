@@ -68,9 +68,6 @@ def main():
                     raise RuntimeError("timed-out output escaped the sealer")
             if "--suite-guard" in sys.argv:
                 from run_suite import main as run_suite
-                graphs = Path.cwd() / 'graphs'
-                graphs.mkdir(exist_ok=True)
-                (graphs / 'builder_public_graph_probe.py').write_text('VALUE = 7\n')
                 # A detached helper deliberately retains stdout. Without the
                 # UID cleanup, the sealer waits for its 30-second sleep.
                 child = "import time; time.sleep(30)"
