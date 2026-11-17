@@ -3,7 +3,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import pwd
+import platform
 import subprocess
 import sys
 import tempfile
@@ -11,15 +11,57 @@ import time
 import urllib.request
 import urllib.error
 
+NODE_VERSION = '22.23.4'
+NODE_ARCHIVE_SHA256 = '1805bcd35e6815559bd2eb97db438d3fdb0eb3a5e6a977b7c1badca76337e9ce'
+
+
+def bridge_runtime(root):
+    """Install an isolated, hash-pinned runtime without replacing system Node."""
+    if platform.system() != 'Linux' or platform.machine() not in ('x86_64', 'amd64'):
+        raise ValueError('This pinned runtime supports the existing Linux x64 host only')
+    runtimes = root / 'runtime'
+    runtimes.mkdir(mode=0o755, exist_ok=True)
+    name = f'node-v{NODE_VERSION}-linux-x64'
+    destination = runtimes / name
+    node = destination / 'bin/node'
+    if not destination.exists():
+        with tempfile.TemporaryDirectory(prefix='.node-', dir=runtimes) as staging:
+            stage = Path(staging)
+            archive = stage / 'node.tar.xz'
+            digest = hashlib.sha256()
+            size = 0
+            with urllib.request.urlopen(f'https://nodejs.org/dist/v{NODE_VERSION}/{name}.tar.xz', timeout=60) as response, archive.open('wb') as output:
+                while chunk := response.read(1024 * 1024):
+                    size += len(chunk)
+                    if size > 80 * 1024 * 1024:
+                        raise ValueError('Runtime download exceeded its bound')
+                    digest.update(chunk)
+                    output.write(chunk)
+            if digest.hexdigest() != NODE_ARCHIVE_SHA256:
+                raise ValueError('Runtime checksum mismatch; no archive extracted')
+            subprocess.run(['tar', '-xJf', str(archive), '--no-same-owner', '-C', str(stage)],
+                           check=True, capture_output=True, timeout=60)
+            extracted = stage / name
+            extracted.chmod(0o755)
+            os.replace(extracted, destination)
+    version = subprocess.run([str(node), '--version'], check=True, capture_output=True, text=True)
+    if version.stdout.strip() != 'v' + NODE_VERSION:
+        raise ValueError('Unexpected isolated runtime version')
+    return node
+
 
 def main():
+    import pwd  # Remote Linux installer; keep runtime validation testable on Windows.
     payload = json.load(sys.stdin)
     files, config = payload['files'], payload['config']
     if set(files) != {'worker.mjs', 'server.mjs', 'audit-app.mjs'}:
         raise ValueError('unexpected public files')
     if config.get('BRIDGE_ENABLED') not in ('true', 'false'):
         raise ValueError('invalid enable flag')
-    subprocess.run(['/usr/bin/node', '--input-type=module', '-e',
+    root = Path('/opt/companion-builder-bridge')
+    root.mkdir(mode=0o755, exist_ok=True)
+    node = bridge_runtime(root)
+    subprocess.run([str(node), '--input-type=module', '-e',
                     "import {DatabaseSync} from 'node:sqlite'; new DatabaseSync(':memory:').close()"],
                    check=True, capture_output=True)
     user = 'companion-builder-bridge'
@@ -29,8 +71,6 @@ def main():
         subprocess.run(['useradd', '--system', '--home-dir', '/var/lib/companion-builder-bridge',
                         '--shell', '/usr/sbin/nologin', user], check=True)
         account = pwd.getpwnam(user)
-    root = Path('/opt/companion-builder-bridge')
-    root.mkdir(mode=0o755, exist_ok=True)
     digest = hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()
     version = root / digest
     version.mkdir(mode=0o755, exist_ok=True)
@@ -60,7 +100,7 @@ Wants=network-online.target
 User={user}
 Group={account.pw_gid}
 Environment=BRIDGE_CONFIG={state}/config.json
-ExecStart=/usr/bin/node {version}/server.mjs
+ExecStart={node} {version}/server.mjs
 Restart=on-failure
 RestartSec=5
 UMask=0077

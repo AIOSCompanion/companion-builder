@@ -50,8 +50,10 @@ The approved job creates a temporary SSH key, registers it with OS Login for
 key when finished. No reusable SSH private key is saved in GitHub. The host-access
 workflow verifies the same pinned host and administrative login before deployment.
 
-The target needs /usr/bin/node >=22.13, Python3, systemd and a deployment SSH user
-with passwordless sudo for the trusted installer. Deployment creates a dedicated
+The existing Linux x64 target needs Python3, tar/xz, systemd and passwordless sudo
+for the trusted installer. It installs an isolated Node 22.23.4 runtime under the
+bridge directory, verifies the official archive against a committed SHA-256 before
+extraction, and leaves system Node unchanged. Deployment creates a dedicated
 non-login service user and a hardened systemd unit. Public receiver files are
 versioned under /opt/companion-builder-bridge; credentials and SQLite live in
 /var/lib/companion-builder-bridge with private permissions. Prior code versions
