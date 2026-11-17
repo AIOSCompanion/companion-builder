@@ -46,7 +46,9 @@ jobs:
         with:
           python-version: '3.12'
       - name: Create the disposable test checkout
-        run: mkdir smoke-checkout
+        run: |
+          mkdir -p smoke-checkout/graphs
+          printf 'VALUE = 7\n' > smoke-checkout/graphs/builder_public_graph_probe.py
       - name: Prepare the test user
         run: python -I -B scripts/prepare_untrusted.py --checkout smoke-checkout --home "$HOME"
       - name: Snapshot trusted scripts

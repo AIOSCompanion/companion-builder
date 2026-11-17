@@ -71,7 +71,9 @@ def main():
                 # A detached helper deliberately retains stdout. Without the
                 # UID cleanup, the sealer waits for its 30-second sleep.
                 child = "import time; time.sleep(30)"
-                code = (f"import subprocess,sys; subprocess.Popen([sys.executable,'-c',{child!r}], "
+                probe = 'import builder_public_graph_probe as graph; assert graph.VALUE == 7'
+                code = (f"import subprocess,sys; subprocess.run([sys.executable,'-c',{probe!r}], cwd='/tmp', check=True); "
+                        f"subprocess.Popen([sys.executable,'-c',{child!r}], "
                         "start_new_session=True); print('public-orphan-marker',flush=True)")
                 started = time.monotonic()
                 def capture(argv, *, env, check):

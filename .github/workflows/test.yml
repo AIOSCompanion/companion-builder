@@ -112,7 +112,7 @@ jobs:
           ref: ${{ inputs.head_sha }}
           token: ${{ steps.checkout-token.outputs.token }}
           path: pr
-          fetch-depth: ${{ inputs.repository == 'companion-memory' && '0' || '1' }}
+          fetch-depth: ${{ inputs.repository != 'aios-desktop-app' && '0' || '1' }}
           persist-credentials: false
 
       - name: Resolve the suite engine peer to an immutable commit
