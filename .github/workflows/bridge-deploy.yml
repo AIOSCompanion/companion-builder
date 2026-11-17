@@ -18,9 +18,13 @@ concurrency:
 
 jobs:
   deploy:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: bridge-deploy
     timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Require the trusted builder main branch
         run: test "$GITHUB_REF" = "refs/heads/main"
@@ -32,15 +36,20 @@ jobs:
           node-version: '22'
       - name: Test signed routing, durable storage and restart recovery before deploying
         run: node --test bridge/worker.test.mjs bridge/portable.test.mjs
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          project_id: ${{ secrets.BRIDGE_GCP_PROJECT }}
       - name: Deploy the bridge without printing credentials or payloads
         env:
-          BRIDGE_SSH_HOST: ${{ vars.BRIDGE_SSH_HOST }}
-          BRIDGE_SSH_USER: ${{ vars.BRIDGE_SSH_USER }}
-          BRIDGE_SSH_PRIVATE_KEY: ${{ secrets.BRIDGE_SSH_PRIVATE_KEY }}
+          BRIDGE_GCP_PROJECT: ${{ secrets.BRIDGE_GCP_PROJECT }}
+          BRIDGE_SSH_HOST: ${{ secrets.BRIDGE_SSH_HOST }}
           BRIDGE_SSH_KNOWN_HOSTS: ${{ secrets.BRIDGE_SSH_KNOWN_HOSTS }}
           BRIDGE_APP_ID: ${{ vars.BRIDGE_APP_ID }}
           BRIDGE_APP_PRIVATE_KEY: ${{ secrets.BRIDGE_APP_PRIVATE_KEY }}
           BRIDGE_WEBHOOK_SECRET: ${{ secrets.BRIDGE_WEBHOOK_SECRET }}
           BRIDGE_STATUS_TOKEN: ${{ secrets.BRIDGE_STATUS_TOKEN }}
           BRIDGE_ENABLED: ${{ inputs.enable }}
-        run: python3 -I -B scripts/deploy_bridge.py
+        run: python3 -B scripts/cloud_deploy_bridge.py

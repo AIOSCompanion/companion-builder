@@ -36,10 +36,19 @@ Do not create replacement Apps or signing keys.
 
 Use the existing protected bridge-deploy environment, main-only and owner-approved:
 
-- Variables BRIDGE_APP_ID, BRIDGE_SSH_HOST, BRIDGE_SSH_USER.
+- Variable BRIDGE_APP_ID.
 - Secrets BRIDGE_APP_PRIVATE_KEY, BRIDGE_WEBHOOK_SECRET, BRIDGE_STATUS_TOKEN.
-- Secrets BRIDGE_SSH_PRIVATE_KEY and BRIDGE_SSH_KNOWN_HOSTS for a verified existing
-  host. Pin its host key using a trusted source; never disable host checking.
+- Secrets BRIDGE_SSH_HOST and BRIDGE_SSH_KNOWN_HOSTS for a verified existing host.
+  Pin its host key using authenticated cloud access; never disable host checking.
+- Existing GCP_WORKLOAD_IDENTITY_PROVIDER, GCP_DEPLOY_SERVICE_ACCOUNT and
+  BRIDGE_GCP_PROJECT secrets. Cloud federation must restrict the numeric repository
+  and owner IDs, main branch and bridge-deploy environment. The deploy identity
+  needs OS Login administrative access on the existing host.
+
+The approved job creates a temporary SSH key, registers it with OS Login for
+15 minutes, derives the username from the authenticated profile and removes the
+key when finished. No reusable SSH private key is saved in GitHub. The host-access
+workflow verifies the same pinned host and administrative login before deployment.
 
 The target needs /usr/bin/node >=22.13, Python3, systemd and a deployment SSH user
 with passwordless sudo for the trusted installer. Deployment creates a dedicated

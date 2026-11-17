@@ -17,15 +17,14 @@ class HostAccessTests(unittest.TestCase):
         self.assertNotIn('PRIVATE_KEY', source)
         self.assertNotIn('credentials_json', source)
 
-    def test_cloud_commands_are_read_only_and_reports_remain_sealed(self):
+    def test_metadata_and_pinned_login_reports_remain_sealed(self):
         source = (Path(__file__).resolve().parents[1] / '.github/workflows/host-access.yml').read_text()
         job = yaml.safe_load(source)['jobs']['inspect']
-        commands = [step['run'] for step in job['steps'] if 'gcloud compute' in step.get('run', '')]
+        commands = [step['run'] for step in job['steps'] if 'scripts/run_sealed.py' in step.get('run', '')]
         self.assertEqual(len(commands), 2)
-        for command, operation in zip(commands, ('describe', 'get-guest-attributes')):
+        for command, operation in zip(commands, ('gcloud compute instances describe', 'scripts/cloud_ssh.py')):
             self.assertIn('scripts/run_sealed.py', command)
-            self.assertIn('gcloud compute instances ' + operation, command)
-            self.assertNotIn('ssh', command)
+            self.assertIn(operation, command)
         artifact = job['steps'][-1]['with']
         self.assertEqual(artifact['path'], '${{ runner.temp }}/host-reports/*.gpg')
         self.assertEqual(artifact['retention-days'], 1)
