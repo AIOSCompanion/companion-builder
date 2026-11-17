@@ -36,7 +36,9 @@ import uuid
 from app_release_artifacts import version
 
 APP_NAME = "Companion.app"
-SECRET_NAMES = frozenset(("CSC_LINK", "CSC_KEY_PASSWORD", "APPLE_API_KEY"))
+# All five signing values. notarytool receives the key ID and issuer as arguments; no tool needs any of them in its
+# environment.
+SECRET_NAMES = frozenset(("CSC_LINK", "CSC_KEY_PASSWORD", "APPLE_API_KEY", "APPLE_API_KEY_ID", "APPLE_API_ISSUER"))
 # Apple's Developer ID intermediates (https://www.apple.com/certificateauthority/), both issued by Apple Root CA
 # (SHA-256 B0B1730ECBC7FF4505142C49F1295E6EDA6BCAED7E2C68C5BE91B5A11001F024). codesign needs the one that issued
 # the team's certificate to build the chain; electron-builder ships its own copies for the same reason.
@@ -78,15 +80,23 @@ def run(args, timeout=180, env=None):
     return stdout
 
 
-def check_bundle(bundle, tag):
-    """The engine's bundle: its Info.plist names an executable that reports this release's version."""
+def bundle_executable(bundle, tag):
+    """The bundle's structure and Info.plist, without executing anything in it. Returns its executable."""
     info = plistlib.loads((bundle / "Contents/Info.plist").read_bytes())
     executable = info.get("CFBundleExecutable", "")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", executable) or not (bundle / "Contents/MacOS" / executable).is_file():
         raise ValueError("macOS bundle executable is invalid")
     if str(info.get("CFBundleShortVersionString")) != version(tag).split("-", 1)[0]:
         raise ValueError("macOS bundle version does not match the reviewed tag")
-    if run([str(bundle / "Contents/MacOS" / executable), "version"]).strip() != version(tag):
+    return bundle / "Contents/MacOS" / executable
+
+
+def check_bundle(bundle, tag):
+    """The engine's bundle: its Info.plist names an executable that reports this release's version.
+
+    This executes the app, so it runs only in steps that hold no signing material: the credential-free check
+    before signing, the unsigned test packaging, and the staging check of the signed ZIP."""
+    if run([str(bundle_executable(bundle, tag)), "version"]).strip() != version(tag):
         raise ValueError("macOS executable does not report the reviewed version")
 
 
@@ -256,14 +266,30 @@ def sign_notarize_staple(app, folder, env, sleep=time.sleep):
             print("Signing cleanup: " + problem)
 
 
-def package(root, tag, env, unsigned=False, sleep=time.sleep):
+def source_bundle(root, tag):
     if platform.system() != "Darwin" or platform.machine() != "arm64":
         raise ValueError("The macOS bundle must be validated on a native arm64 runner")
-    root = Path(root)
-    bundle = root / f"Companion_{version(tag)}_darwin_arm64.app"
+    bundle = Path(root) / f"Companion_{version(tag)}_darwin_arm64.app"
     if bundle.is_symlink() or not bundle.is_dir():
         raise ValueError("Expected macOS bundle is missing")
-    check_bundle(bundle, tag)
+    return bundle
+
+
+def check(root, tag):
+    """The credential-free step before signing: the built bundle reports this release's version."""
+    check_bundle(source_bundle(root, tag), tag)
+    print("macOS bundle structure and version verified before signing")
+
+
+def package(root, tag, env, unsigned=False, sleep=time.sleep):
+    root = Path(root)
+    bundle = source_bundle(root, tag)
+    if unsigned:
+        check_bundle(bundle, tag)  # this step holds no signing material
+    else:
+        # The signing step runs Apple's tools only: the app was executed by the credential-free check before
+        # this step, and its signed copy is executed again by the staging check, which holds no secrets.
+        bundle_executable(bundle, tag)
     suffix = "_unsigned-test" if unsigned else ""
     archive = root / f"Companion_{version(tag)}_darwin_arm64{suffix}.zip"
     if archive.exists():

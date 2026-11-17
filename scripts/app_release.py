@@ -73,8 +73,8 @@ def write_outputs(values):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("checkout", "toolchain", "preflight", "build", "check-windows", "sign-macos",
-                                            "unsigned-macos", "stage", "draft", "upload", "finalize"))
+    parser.add_argument("command", choices=("checkout", "toolchain", "preflight", "build", "check-windows", "check-macos",
+                                            "sign-macos", "unsigned-macos", "stage", "draft", "upload", "finalize"))
     parser.add_argument("--platform", choices=("windows-amd64", "darwin-arm64"))
     args = parser.parse_args()
     env = dict(os.environ)
@@ -103,6 +103,10 @@ def main():
             build(env, args.platform)
         elif args.command == "check-windows":
             from app_release_windows import check
+            check(Path(env["APP_SOURCE_DIR"]) / "dist", tag)
+        elif args.command == "check-macos":
+            # Its own step, without signing material: the only place the built app runs before it is signed.
+            from app_release_macos import check
             check(Path(env["APP_SOURCE_DIR"]) / "dist", tag)
         elif args.command in ("sign-macos", "unsigned-macos"):
             if (args.command == "unsigned-macos") != unsigned:

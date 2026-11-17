@@ -126,6 +126,39 @@ class MacPackageTests(unittest.TestCase):
         self.assertTrue(tools.calls[-1][-1].endswith("Companion_1.2.3-rc.1_darwin_arm64.zip"))
         self.assertEqual(len(tools.named("security", "delete-keychain")), 1)
 
+    def test_the_signing_step_runs_only_apples_tools_and_none_receives_a_signing_secret(self):
+        # Merge gate F1 (17 Nov 2026): the step holding the five Apple secrets ran the private bundle's
+        # `Companion version`, and every tool received APPLE_API_KEY_ID and APPLE_API_ISSUER.
+        import os
+        import subprocess
+        names = {"CSC_LINK", "CSC_KEY_PASSWORD", "APPLE_API_KEY", "APPLE_API_KEY_ID", "APPLE_API_ISSUER"}
+        self.assertEqual(set(self.SECRETS), names)
+        recorded = []
+        def run(args, **kwargs):
+            recorded.append((list(args), kwargs.get("env")))
+            out, err = b"", b""
+            if args[:2] == ["security", "list-keychains"] and len(args) == 4:
+                out = b'    "/Users/runner/Library/Keychains/login.keychain-db"\n'
+            elif "find-identity" in args:
+                out = ('  1) ' + "A" * 40 + ' "Developer ID Application: Synthetic Team (ABCDE12345)"\n').encode()
+            elif args[:3] == ["xcrun", "notarytool", "submit"]:
+                out = ('{"id": "%s", "status": "Accepted"}' % UUID).encode()
+            elif args[:2] == ["codesign", "-d"]:
+                err = GOOD_SIGNATURE.encode()
+            elif args[0] == "spctl":
+                err = b"accepted\nsource=Notarized Developer ID\n"
+            elif args[-1] == "version":
+                out = b"1.2.3-rc.1\n"
+            return subprocess.CompletedProcess(args, 0, out, err)
+        with patch.dict(os.environ, self.SECRETS), patch("app_release_macos.subprocess.run", side_effect=run):
+            package(self.root, "v1.2.3-rc.1", dict(os.environ), sleep=lambda _: None)
+        self.assertGreater(len(recorded), 10)
+        for args, env in recorded:
+            with self.subTest(tool=args[:2]):
+                self.assertIn(args[0], {"security", "codesign", "ditto", "xcrun", "spctl"})
+                self.assertIsNotNone(env)
+                self.assertFalse(names & set(env))
+
     def test_the_bundled_apple_intermediates_match_their_pins_and_a_mismatch_refuses_before_any_keychain(self):
         import hashlib
         for name, expected in app_release_macos.INTERMEDIATES.items():

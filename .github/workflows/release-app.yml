@@ -83,19 +83,15 @@ jobs:
           retention-days: 1
           if-no-files-found: ignore
 
-  build:
+  # Windows and macOS are separate jobs, not one matrix: GitHub sends a job's runner every secret that job
+  # references, and the Windows job runs code that never runs on macOS (npm install scripts, go run, Windows-only
+  # packages). It must never hold the Apple signing secrets, so none is referenced anywhere in it.
+  build-windows:
+    name: Windows x64 (unsigned)
     needs: identity
+    runs-on: windows-2022
     environment: release-signing
     timeout-minutes: 75
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: windows-amd64
-            os: windows-2022
-          - platform: darwin-arm64
-            os: macos-15
-    runs-on: ${{ matrix.os }}
     defaults:
       run:
         shell: bash
@@ -160,15 +156,122 @@ jobs:
         run: >-
           python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name build-app
           --log-dir "$RUNNER_TEMP/app-release-logs" --
-          python -I -B "$RUNNER_TEMP/trusted/app_release.py" build --platform "${{ matrix.platform }}"
+          python -I -B "$RUNNER_TEMP/trusted/app_release.py" build --platform windows-amd64
       - name: Verify the packaged Windows window and resident engine in a fresh home
-        if: matrix.platform == 'windows-amd64'
         run: >-
           python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name verify-windows-app
           --log-dir "$RUNNER_TEMP/app-release-logs" --
           python -I -B "$RUNNER_TEMP/trusted/app_release.py" check-windows
+      - name: Bind only the expected downloadable assets to this source commit
+        env:
+          APP_ASSET_DIR: ${{ runner.temp }}/app-release-assets
+        run: >-
+          python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name stage-app-assets
+          --log-dir "$RUNNER_TEMP/app-release-logs" --
+          python -I -B "$RUNNER_TEMP/trusted/app_release.py" stage --platform windows-amd64
+      - name: Verify trusted scripts before publication
+        run: python -I -B "$RUNNER_TEMP/trusted/snapshot_trusted.py" verify --dest "$RUNNER_TEMP/trusted"
+      - name: Publish only verified assets to the unpublished new-app draft
+        env:
+          APP_ASSET_DIR: ${{ runner.temp }}/app-release-assets
+          GH_TOKEN: ${{ secrets.PUBLISH_RELEASES_TOKEN }}
+          APP_RELEASE_REPOSITORY: ${{ needs.identity.outputs.release_repository }}
+        run: >-
+          python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name upload-app-assets
+          --log-dir "$RUNNER_TEMP/app-release-logs" --
+          python -I -B "$RUNNER_TEMP/trusted/app_release.py" upload --platform windows-amd64
+      - name: Verify the trusted snapshot before retaining logs
+        if: always()
+        run: python -I -B "$RUNNER_TEMP/trusted/snapshot_trusted.py" verify --dest "$RUNNER_TEMP/trusted"
+      - name: Retain encrypted logs only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sealed-app-windows-amd64
+          path: ${{ runner.temp }}/app-release-logs/*.gpg
+          retention-days: 1
+          if-no-files-found: ignore
+
+  build-macos:
+    name: macOS arm64 (Developer ID signed, notarised, stapled)
+    needs: identity
+    runs-on: macos-15
+    environment: release-signing
+    timeout-minutes: 75
+    defaults:
+      run:
+        shell: bash
+    env:
+      TAG: ${{ inputs.tag }}
+      SOURCE_SHA: ${{ needs.identity.outputs.commit_sha }}
+      TAG_OBJECT_SHA: ${{ needs.identity.outputs.tag_object_sha }}
+      APP_SOURCE_DIR: ${{ github.workspace }}/source
+      UNSIGNED_MACOS_TEST: ${{ inputs.allow_unsigned_macos_test }}
+      LOG_RECIPIENT: ${{ vars.TEST_LOG_RECIPIENT }}
+      GOTOOLCHAIN: local
+    steps:
+      - name: Check out the trusted public builder at this workflow commit
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Protect the trusted scripts before any private code is present
+        run: python -I -B scripts/app_release_snapshot.py "$RUNNER_TEMP/trusted"
+      - name: Import the team public log key
+        env:
+          TEST_LOG_PUBLIC_KEY: ${{ vars.TEST_LOG_PUBLIC_KEY }}
+        run: printf '%s\n' "$TEST_LOG_PUBLIC_KEY" | gpg --batch --import >/dev/null 2>&1
+      - name: Create a read-only source checkout token
+        id: source-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510
+        with:
+          app-id: ${{ vars.BUILDER_APP_ID }}
+          private-key: ${{ secrets.BUILDER_APP_PRIVATE_KEY }}
+          owner: AIOSCompanion
+          repositories: companion-engine
+          permission-contents: read
+      - name: Check out private source at the validated immutable commit
+        env:
+          GH_TOKEN: ${{ steps.source-token.outputs.token }}
+        run: >-
+          python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name checkout-private-app
+          --log-dir "$RUNNER_TEMP/app-release-logs" --
+          python -I -B "$RUNNER_TEMP/trusted/app_release.py" checkout
+      # Go is pinned by the source's go.mod (toolchain line, else go line); Node comes from the UI's engines.
+      - name: Read the Go and Node versions the pinned source asks for
+        id: toolchain
+        run: >-
+          python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name app-toolchain
+          --log-dir "$RUNNER_TEMP/app-release-logs" --export-output go_version --export-output node_version --
+          python -I -B "$RUNNER_TEMP/trusted/app_release.py" toolchain
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ steps.toolchain.outputs.go_version }}
+          cache: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.toolchain.outputs.node_version }}
+      - name: Recheck the checkout, exact tag and toolchain before building
+        run: >-
+          python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name app-source-preflight
+          --log-dir "$RUNNER_TEMP/app-release-logs" --
+          python -I -B "$RUNNER_TEMP/trusted/app_release.py" preflight
+      - name: Build without publisher or signing credentials
+        run: >-
+          python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name build-app
+          --log-dir "$RUNNER_TEMP/app-release-logs" --
+          python -I -B "$RUNNER_TEMP/trusted/app_release.py" build --platform darwin-arm64
+      # The built app runs here, in a step without signing material, and never in the signing step.
+      - name: Check the macOS bundle version without credentials
+        run: >-
+          python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name check-macos-bundle
+          --log-dir "$RUNNER_TEMP/app-release-logs" --
+          python -I -B "$RUNNER_TEMP/trusted/app_release.py" check-macos
+      # The only step with the Apple secrets. It runs Apple's tools and this builder's scripts, nothing built.
       - name: Sign notarize and staple the macOS arm64 bundle
-        if: matrix.platform == 'darwin-arm64' && !inputs.allow_unsigned_macos_test
+        if: ${{ !inputs.allow_unsigned_macos_test }}
         env:
           CSC_LINK: ${{ secrets.CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
@@ -180,7 +283,7 @@ jobs:
           --log-dir "$RUNNER_TEMP/app-release-logs" --
           python -I -B "$RUNNER_TEMP/trusted/app_release.py" sign-macos
       - name: Package the explicitly requested unsigned macOS test build
-        if: matrix.platform == 'darwin-arm64' && inputs.allow_unsigned_macos_test
+        if: inputs.allow_unsigned_macos_test
         run: >-
           python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name unsigned-macos-test
           --log-dir "$RUNNER_TEMP/app-release-logs" --
@@ -191,7 +294,7 @@ jobs:
         run: >-
           python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name stage-app-assets
           --log-dir "$RUNNER_TEMP/app-release-logs" --
-          python -I -B "$RUNNER_TEMP/trusted/app_release.py" stage --platform "${{ matrix.platform }}"
+          python -I -B "$RUNNER_TEMP/trusted/app_release.py" stage --platform darwin-arm64
       - name: Verify trusted scripts before publication
         run: python -I -B "$RUNNER_TEMP/trusted/snapshot_trusted.py" verify --dest "$RUNNER_TEMP/trusted"
       - name: Publish only verified assets to the unpublished new-app draft
@@ -202,7 +305,7 @@ jobs:
         run: >-
           python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name upload-app-assets
           --log-dir "$RUNNER_TEMP/app-release-logs" --
-          python -I -B "$RUNNER_TEMP/trusted/app_release.py" upload --platform "${{ matrix.platform }}"
+          python -I -B "$RUNNER_TEMP/trusted/app_release.py" upload --platform darwin-arm64
       - name: Verify the trusted snapshot before retaining logs
         if: always()
         run: python -I -B "$RUNNER_TEMP/trusted/snapshot_trusted.py" verify --dest "$RUNNER_TEMP/trusted"
@@ -210,13 +313,13 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: sealed-app-${{ matrix.platform }}
+          name: sealed-app-darwin-arm64
           path: ${{ runner.temp }}/app-release-logs/*.gpg
           retention-days: 1
           if-no-files-found: ignore
 
   finalize:
-    needs: [identity, build]
+    needs: [identity, build-windows, build-macos]
     runs-on: ubuntu-latest
     environment: release-signing
     timeout-minutes: 10
