@@ -25,10 +25,11 @@ class WindowsProbeTests(unittest.TestCase):
             seen.update(kwargs)
             raise Stop
 
-        with patch.object(app_release_windows.os, "name", "nt"), \
-                patch.object(app_release_windows.tempfile, "TemporaryDirectory", side_effect=temporary):
+        with patch.object(app_release_windows.tempfile, "TemporaryDirectory", side_effect=temporary):
             with self.assertRaises(Stop):
-                app_release_windows.check(tempfile.gettempdir(), "v1.2.3")
+                app_release_windows.check(tempfile.gettempdir(), "v1.2.3", windows=True)
+        with self.assertRaisesRegex(ValueError, "Windows runner"):
+            app_release_windows.check(tempfile.gettempdir(), "v1.2.3", windows=False)
         self.assertIs(seen.get("ignore_cleanup_errors"), True)
         self.assertEqual(seen.get("prefix"), "companion-package-")
 

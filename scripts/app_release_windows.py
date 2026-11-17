@@ -38,8 +38,8 @@ def window_for(pid):
     return found[0] if found else None
 
 
-def check(root, tag):
-    if os.name != "nt":
+def check(root, tag, *, windows=None):
+    if not (os.name == "nt" if windows is None else windows):
         raise ValueError("Windows package verification requires a Windows runner")
     desktop_name, cli_name = filenames(tag, "windows-amd64")
     root = Path(root).resolve()
