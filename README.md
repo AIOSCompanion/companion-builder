@@ -59,6 +59,10 @@ runtime, with memory installed against those constraints, matching the shared in
 standalone lock can pin a different native database version. Tests never resolve packages inside the
 network-isolated suite.
 
+Engine shards group every test function and all its parameter cases together.
+The partition key excludes parameter IDs: a UUID generated during collection
+must not send the same logical case to different workers or leave it untested.
+
 Memory's 116,000-item store measurements run in a separate job on a fresh runner,
 as their wall-clock contract requires. The ordinary memory suite excludes only
 that benchmark file; the separate job runs the entire file with the same latency
