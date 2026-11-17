@@ -18,12 +18,12 @@ import sys
 SUITES = {
     "aiosxaegra": [
         {"suite": "engine unit tests (pytest)", "repo": "aiosxaegra",
-         "setup": "pip install --quiet --user uv && uv sync --locked --extra voice-worker && uv export --locked --extra voice-worker --no-hashes --no-emit-project > /tmp/engine-constraints.txt && uv pip install --python .venv/bin/python --constraint /tmp/engine-constraints.txt --editable ../companion-memory",
+         "setup": "pip install --quiet --user uv && uv sync --locked && uv export --locked --no-hashes --no-emit-project > /tmp/engine-constraints.txt && uv pip install --python .venv/bin/python --constraint /tmp/engine-constraints.txt --editable ../companion-memory",
          "run": ".venv/bin/python -m pytest tests/unit -vv --maxfail=1 -o faulthandler_timeout=120 --tb=short -p no:cacheprovider --junitxml=junit.xml"},
     ],
     "companion-memory": [
         {"suite": "memory unit tests (pytest)", "repo": "companion-memory",
-         "setup": "pip install --quiet --user uv && uv sync --project ../aiosxaegra --locked --extra voice-worker && uv export --project ../aiosxaegra --locked --extra voice-worker --no-hashes --no-emit-project > /tmp/engine-constraints.txt && uv pip install --python ../aiosxaegra/.venv/bin/python --constraint /tmp/engine-constraints.txt --editable '.[dev]' && ln -s ../aiosxaegra/.venv .venv",
+         "setup": "pip install --quiet --user uv && uv sync --project ../aiosxaegra --locked && uv export --project ../aiosxaegra --locked --no-hashes --no-emit-project > /tmp/engine-constraints.txt && uv pip install --python ../aiosxaegra/.venv/bin/python --constraint /tmp/engine-constraints.txt --editable '.[dev]' && ln -s ../aiosxaegra/.venv .venv",
          "run": ".venv/bin/python -m pytest -q --tb=no -p no:cacheprovider --junitxml=junit.xml"},
     ],
     "aios-desktop-app": [
