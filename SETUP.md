@@ -1,8 +1,9 @@
 # Finish configuring the public builder
 
 For the new Go/Wails app, use the separate [app release setup](docs/APP_RELEASE.md).
-Its artifact destination requires an explicit owner decision and repository ID;
-the legacy Electron publishing destination below is not the new app's default.
+Its artifact destination is one builder variable, `APP_RELEASE_REPOSITORY`, set after
+the owner chooses the repository; the legacy Electron publishing destination below is
+never the new app's destination.
 
 The public repository and three protected environments already exist. Original Apple
 credentials already exist in the private desktop repository and worked for v0.18.0.
