@@ -44,8 +44,10 @@ def check(root, tag):
     desktop_name, cli_name = filenames(tag, "windows-amd64")
     root = Path(root).resolve()
     cli, desktop = root / cli_name, root / desktop_name
-    # A fresh home selects no owner profile, model key, database or fixed port.
-    with tempfile.TemporaryDirectory(prefix="companion-package-") as temporary:
+    # A fresh home selects no owner profile, model key, database or fixed port. WebView2 keeps its data folder in
+    # here, and its helper processes can hold files briefly after the window has gone: removing the folder on this
+    # ephemeral runner is not part of the verdict, so a locked file there must not fail checks that passed.
+    with tempfile.TemporaryDirectory(prefix="companion-package-", ignore_cleanup_errors=True) as temporary:
         home = Path(temporary) / "home"
         env = {key: value for key, value in os.environ.items() if not any(
             token in key.upper() for token in ("TOKEN", "API_KEY", "SECRET", "PASSWORD", "CREDENTIAL"))}

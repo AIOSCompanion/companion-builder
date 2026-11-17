@@ -45,9 +45,17 @@ Keep the existing log public-key variables `TEST_LOG_PUBLIC_KEY` and
 `TEST_LOG_RECIPIENT`. Signing requires maintained `CSC_LINK` (base64 P12; line
 breaks are accepted), `CSC_KEY_PASSWORD`, `APPLE_API_KEY` (P8 text),
 `APPLE_API_KEY_ID` and `APPLE_API_ISSUER` environment secrets. Publisher
-credentials exist only on draft creation, upload and finalization steps. Apple
-secrets exist only on the macOS sign/notarize/staple step after the build
-finishes, and no tool receives them in its environment.
+credentials exist only on draft creation, upload and finalization steps.
+
+The Apple secrets are referenced by one step of the macOS job only: sign,
+notarize and staple. Windows and macOS are separate jobs because GitHub sends a
+job's runner every secret that job references; the Windows job, which runs npm
+install scripts and `go run`, references none of them. The signing step comes
+after the build and after a separate credential-free step that runs the built
+app's `version` check. It runs only Apple's tools and this builder's scripts,
+never the built app. None of those tools receives any of the five values in its
+environment: notarytool gets the key ID and issuer as arguments. The step's own
+shell and wrapper processes do hold them, as any step's environment does.
 
 ## Source and artifact contract
 
@@ -77,7 +85,9 @@ window, authenticated engine access in a fresh isolated home, engine residency
 after window close, and stopping only that home through `down --home`. The tag
 must therefore contain the engine's `down` command.
 
-The macOS helper verifies bundle and executable versions and signs a copy of the
+A credential-free step first checks the macOS bundle's structure and runs its
+executable's `version`. The signing step then checks the structure again without
+running anything from the bundle, and signs a copy of the
 bundle named `Companion.app`, so the download unpacks to the app's own name. A
 temporary keychain receives Apple's Developer ID intermediates (bundled in
 `scripts/apple`, pinned by SHA-256) and the certificate; the one valid Developer
@@ -101,6 +111,18 @@ complete platform sets and GitHub's matching SHA256 asset digests. All releases
 remain **unpublished drafts** for owner review/publication. Resuming a draft with
 a different source or signing mode is refused.
 
+**Recovering a failed run.** Signed macOS output is never byte-identical between
+builds (its secure timestamp and notarisation ticket differ), and a rebuilt
+Windows executable may differ too. So after a partial failure:
+- Use **Re-run failed jobs** on the same run. The jobs that passed keep their
+  uploaded files, and the failed job uploads its own files. This works when the
+  failed job had not uploaded any file yet.
+- A fresh dispatch or **Re-run all jobs** rebuilds every platform. The draft
+  refuses those new bytes under names it already holds, so delete the draft (or
+  the affected platform's files on it) first.
+- Switching between a signed and an unsigned macOS build always needs a new
+  draft: delete the old draft first.
+
 The draft is found through the releases listing, which includes drafts for a
 credential that can push. GitHub's `GET /releases/tags/{tag}` returns published
 releases only, so it cannot find a draft. Exactly one draft and no published
@@ -117,6 +139,16 @@ through the sealed-log wrapper. A failing step leaves its cause, and the tools'
 own output, in that encrypted log; the public log shows only the step's exit
 code, duration and error class. Actions artifacts contain only encrypted `.gpg`
 logs, retained for one day. No build cache or raw private log is uploaded.
+
+The public run log does show a few values from the private source, from dispatch
+on:
+- the tag;
+- the pinned commit SHA and tag-object SHA, which are job environment that
+  GitHub lists at every build step;
+- the Go version and the Node major line, which are setup-go and setup-node
+  inputs.
+
+No step prints anything else from the private source or its environment.
 
 Trusted public scripts are copied before private checkout, protected with numeric
 root ownership on Linux/macOS or a SYSTEM-owner DACL on Windows, and hash-checked
