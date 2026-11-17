@@ -5,7 +5,11 @@ import sys
 
 
 def bucket(nodeid, count):
-    return int.from_bytes(hashlib.sha256(nodeid.encode()).digest()[:8], 'big') % count
+    # Parametrization IDs may contain UUIDs minted independently by each
+    # collecting worker. Keep every variant of the static function (or a
+    # parametrized class) together, so those IDs cannot create gaps/duplicates.
+    key = nodeid.split('[', 1)[0]
+    return int.from_bytes(hashlib.sha256(key.encode()).digest()[:8], 'big') % count
 
 
 class Shard:

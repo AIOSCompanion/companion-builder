@@ -47,7 +47,8 @@ SUITES['companion-memory'].append(dict(_memory, **{
 }))
 
 # Native-host/PTY tests are intentionally slow. Every shard collects the complete
-# suite, then hashes node IDs into a disjoint partition; no tests are dropped.
+# suite, then hashes the static function before parameter IDs into a disjoint
+# partition. Random parameter values cannot omit or duplicate cases.
 _engine = SUITES['aiosxaegra'][0]
 SUITES['aiosxaegra'] = [dict(_engine, **{
     'suite': f'engine unit tests shard {index + 1}/8 (pytest)',

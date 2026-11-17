@@ -26,7 +26,13 @@ class ShardTests(unittest.TestCase):
             config = folder / 'pytest.ini'
             config.write_text('[pytest]\n')
             source = folder / 'test_synthetic.py'
-            source.write_text('\n'.join(f'def test_case_{i}(): assert True' for i in range(64)))
+            source.write_text(
+                'import json, pathlib, uuid, pytest\n' +
+                '\n'.join(f'def test_case_{i}(): assert True' for i in range(64)) +
+                '\n@pytest.mark.parametrize("ordinal,nonce", [(i,str(uuid.uuid4())) for i in range(16)])\n'
+                'def test_random_collection_ids(ordinal, nonce):\n'
+                '    with pathlib.Path(__file__).with_name("seen.jsonl").open("a") as out:\n'
+                '        out.write(json.dumps(ordinal) + "\\n")\n')
             total = 0
             for index in range(8):
                 report = folder / f'{index}.xml'
@@ -35,10 +41,13 @@ class ShardTests(unittest.TestCase):
                                         capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 total += len(list(ET.parse(report).iter('testcase')))
-            self.assertEqual(total, 64)
+            self.assertEqual(total, 80)
+            seen = [int(line) for line in (folder / 'seen.jsonl').read_text().splitlines()]
+            self.assertEqual(len(seen), 16)
+            self.assertEqual(set(seen), set(range(16)))
 
     def test_entire_collection_runs_once_across_all_shards_with_no_gaps(self):
-        original = [SimpleNamespace(nodeid=f'tests/unit/test_example.py::test_case[{i}]') for i in range(10000)]
+        original = [SimpleNamespace(nodeid=f'tests/unit/test_example.py::test_case_{i // 7}[{i % 7}]') for i in range(10000)]
         seen = []
         for index in range(8):
             selected = list(original)
@@ -55,6 +64,13 @@ class ShardTests(unittest.TestCase):
         names = ['tests/test_a.py::test_one', 'tests/test_b.py::test_two[param]']
         expected = {name: shards.bucket(name, 8) for name in names}
         self.assertEqual({name: shards.bucket(name, 8) for name in reversed(names)}, expected)
+
+    def test_random_parameter_ids_cannot_change_the_functions_shard(self):
+        names = [f'tests/test_a.py::test_one[owner-{i}]' for i in range(100)]
+        self.assertEqual(len({shards.bucket(name, 8) for name in names}), 1)
+        # A parametrized class also stays together across collectors.
+        names = [f'tests/test_b.py::TestOwner[nonce-{i}]::test_reply' for i in range(100)]
+        self.assertEqual(len({shards.bucket(name, 8) for name in names}), 1)
 
     def test_invalid_index_refuses_to_run_pytest(self):
         with self.assertRaises(SystemExit):
