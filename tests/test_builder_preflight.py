@@ -158,6 +158,11 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("uv sync --project ../aiosxaegra --locked", memory_setup)
         self.assertIn("--editable '.[dev]'", memory_setup)
         self.assertIn("ln -s ../aiosxaegra/.venv .venv", memory_setup)
+        for suite in plan.SUITES['aiosxaegra']:
+            self.assertIn('--editable ../companion-memory', suite['setup'])
+        workflow = yaml.safe_load((ROOT / '.github/workflows/test.yml').read_text())
+        checkout = next(step for step in workflow['jobs']['suite']['steps'] if step.get('with', {}).get('path') == 'pr')
+        self.assertEqual(checkout['with']['fetch-depth'], "${{ inputs.repository != 'aios-desktop-app' && '0' || '1' }}")
 
     def test_desktop_runtime_tests_do_not_skip_the_canonical_native_install(self):
         suites = plan.SUITES["aios-desktop-app"]

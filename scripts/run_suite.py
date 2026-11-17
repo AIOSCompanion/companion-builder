@@ -27,7 +27,7 @@ def inner_command(command, user, path):
     quoted_user = shlex.quote(user)
     search_path = shlex.quote(f"/home/{user}/.local/bin:{path}")
     env = (f"env -i PATH={search_path} HOME=/home/{user} LANG=C.UTF-8 "
-           f"PYTHONDONTWRITEBYTECODE=1")
+           f'PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PWD:$PWD/graphs"')
     cleanup = (f"status=$?; /usr/bin/pkill -KILL -u {quoted_user} >/dev/null 2>&1; "
                'cleanup_status=$?; if [ "$cleanup_status" -gt 1 ]; then exit 125; fi; exit "$status"')
     return (f"trap {shlex.quote(cleanup)} EXIT; trap 'exit 143' TERM; "
