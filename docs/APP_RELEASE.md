@@ -93,6 +93,11 @@ Trusted public scripts are copied before private checkout, protected with numeri
 root ownership on Linux/macOS or a SYSTEM-owner DACL on Windows, and hash-checked
 before upload. Real write-denial probes and known-writable/mutated negative controls
 run on all three hosted operating systems in the public self-check.
+Windows uses checked native ownership APIs and reads back every owner SID. It
+temporarily enables/restores the runner's existing `SeRestorePrivilege` for those
+changes; a process lacking that privilege fails closed. This avoids treating an
+`icacls /C` zero exit status as proof of ownership. See Microsoft's
+[ownership API contract](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-setnamedsecurityinfow).
 
 This is a trusted-tagged-code release lane. These protections catch ordinary
 writes and changed snapshot content; they do not isolate malicious code running

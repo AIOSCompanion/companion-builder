@@ -16,7 +16,8 @@ def release_for_cleanup(destination):
         # This owns only a disposable snapshot beneath this command's temporary
         # directory, never the repository or any production/user directory.
         sid = windows_sid()
-        checked(["icacls", str(destination), "/setowner", "*" + sid, "/T", "/C", "/Q"])
+        from app_release_windows_acl import set_owners
+        set_owners(destination, sid)
         for path in [destination, *destination.rglob("*")]:
             checked(["icacls", str(path), "/grant:r", f"*{sid}:(F)", "/Q"])
     else:
