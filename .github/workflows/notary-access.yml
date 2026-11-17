@@ -1,0 +1,39 @@
+name: Verify existing Apple notarization access
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    if: github.ref == 'refs/heads/main'
+    runs-on: macos-15
+    environment: release-signing
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Import the public log key
+        env:
+          PUBLIC_LOG_KEY: ${{ vars.TEST_LOG_PUBLIC_KEY }}
+        run: printf '%s\n' "$PUBLIC_LOG_KEY" | gpg --batch --import >/dev/null 2>&1
+      - name: Verify the existing key using Apple's native read-only history command
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          LOG_RECIPIENT: ${{ vars.TEST_LOG_RECIPIENT }}
+        run: >-
+          python3 -I -B scripts/run_sealed.py --name apple-notary-access
+          --log-dir "$RUNNER_TEMP/notary-reports" --
+          python3 -B scripts/check_notary_access.py
+      - name: Retain only encrypted diagnostic output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sealed-notary-access
+          path: ${{ runner.temp }}/notary-reports/*.gpg
+          retention-days: 1
