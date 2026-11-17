@@ -74,7 +74,8 @@ def install(config):
     previous = snippet.read_bytes() if snippet.exists() else None
     if previous is not None and not previous.startswith(MARKER.encode()):
         raise ValueError('Existing snippet is not owned by this installer')
-    backups = Path('/var/lib/companion-builder-bridge/proxy-backups')
+    # Keep root's configuration backups outside the receiver's writable state.
+    backups = Path('/var/backups/companion-builder-bridge')
     backups.mkdir(mode=0o700, exist_ok=True)
     backups.chmod(0o700)
     backup = backups / (hashlib.sha256(original).hexdigest() + '.conf')
