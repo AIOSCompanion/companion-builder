@@ -61,3 +61,10 @@ class AppWorkflowTests(unittest.TestCase):
         self.assertEqual(setup["with"]["go-version"], "1.27.4")
         self.assertFalse(setup["with"]["cache"])
         self.assertNotIn("self-hosted", str(WORKFLOW))
+
+    def test_runner_paths_are_evaluated_in_step_context_not_invalid_job_environment(self):
+        for job in WORKFLOW["jobs"].values():
+            self.assertNotIn("runner.", str(job.get("env", {})))
+        steps = WORKFLOW["jobs"]["build"]["steps"]
+        paths = [step["env"]["APP_ASSET_DIR"] for step in steps if "APP_ASSET_DIR" in step.get("env", {})]
+        self.assertEqual(paths, ["${{ runner.temp }}/app-release-assets"] * 2)

@@ -31,15 +31,11 @@ def protect_windows(destination, sid):
     # delete or add files. Explicit administrator grants are intentionally absent.
     # Tagged release code is trusted; an elevated adversary could still take
     # ownership, just as a Linux release dependency could invoke sudo.
-    from app_release_windows_acl import set_owners
+    from app_release_windows_acl import set_owners, set_permissions
     set_owners(destination, "S-1-5-18")
     # Inheritance flags are meaningful only for directories. Applying the same
     # inheritable ACE to a file can leave it with no effective read grant.
-    entries = sorted(Path(destination).rglob("*"), key=lambda path: len(path.parts), reverse=True)
-    for path in [*entries, Path(destination)]:
-        inherit = "(OI)(CI)" if path.is_dir() else ""
-        checked(["icacls", str(path), "/inheritance:r", "/grant:r",
-                 f"*S-1-5-18:{inherit}(F)", "/grant:r", f"*{sid}:{inherit}(RX)", "/Q"])
+    set_permissions(destination, sid, readonly=True)
 
 
 def verify_write_denied(destination):

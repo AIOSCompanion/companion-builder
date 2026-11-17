@@ -37,6 +37,10 @@ def native():
     security.SetNamedSecurityInfoW.restype = wintypes.DWORD
     security.ConvertStringSidToSidW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(pointer)]
     security.ConvertSidToStringSidW.argtypes = [pointer, ctypes.POINTER(pointer)]
+    security.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [wintypes.LPCWSTR,
+        wintypes.DWORD, ctypes.POINTER(pointer), ctypes.POINTER(wintypes.DWORD)]
+    security.GetSecurityDescriptorDacl.argtypes = [pointer, ctypes.POINTER(wintypes.BOOL),
+        ctypes.POINTER(pointer), ctypes.POINTER(wintypes.BOOL)]
     kernel.LocalFree.argtypes = [pointer]
     kernel.LocalFree.restype = pointer
     kernel.CloseHandle.argtypes = [wintypes.HANDLE]
@@ -109,3 +113,26 @@ def set_owners(destination, sid):
                     raise RuntimeError("Windows snapshot owner does not match the required SID")
     finally:
         kernel.LocalFree(owner)
+
+
+def set_permissions(destination, sid, *, readonly):
+    """Replace the complete DACL; do not retain image-specific explicit grants."""
+    security, kernel = native()
+    paths = sorted(Path(destination).rglob("*"), key=lambda path: len(path.parts), reverse=True)
+    for path in [*paths, Path(destination)]:
+        if path.is_symlink() or path.is_junction():
+            raise RuntimeError("Snapshot permissions cannot follow links")
+        inherit = "OICI" if path.is_dir() else ""
+        rights = "FRFX" if readonly else "FA"
+        sddl = f"D:P(A;{inherit};FA;;;SY)(A;{inherit};{rights};;;{sid})"
+        descriptor, acl = ctypes.c_void_p(), ctypes.c_void_p()
+        if not security.ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, ctypes.byref(descriptor), None):
+            raise RuntimeError("Exact snapshot permissions could not be constructed")
+        try:
+            present, defaulted = wintypes.BOOL(), wintypes.BOOL()
+            if not security.GetSecurityDescriptorDacl(descriptor, ctypes.byref(present), ctypes.byref(acl), ctypes.byref(defaulted)) or not present:
+                raise RuntimeError("Exact snapshot DACL is unavailable")
+            if security.SetNamedSecurityInfoW(str(path), 1, 0x80000004, None, None, acl, None):
+                raise RuntimeError("Exact protected Windows snapshot DACL could not be applied")
+        finally:
+            kernel.LocalFree(descriptor)

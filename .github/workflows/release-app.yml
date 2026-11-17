@@ -106,7 +106,6 @@ jobs:
       SOURCE_SHA: ${{ needs.identity.outputs.commit_sha }}
       TAG_OBJECT_SHA: ${{ needs.identity.outputs.tag_object_sha }}
       APP_SOURCE_DIR: ${{ github.workspace }}/source
-      APP_ASSET_DIR: ${{ runner.temp }}/app-release-assets
       UNSIGNED_MACOS_TEST: ${{ inputs.allow_unsigned_macos_test }}
       LOG_RECIPIENT: ${{ vars.TEST_LOG_RECIPIENT }}
       GOTOOLCHAIN: local
@@ -182,6 +181,8 @@ jobs:
           --log-dir "$RUNNER_TEMP/app-release-logs" --
           python -I -B "$RUNNER_TEMP/trusted/app_release.py" unsigned-macos
       - name: Bind only the expected downloadable assets to this source commit
+        env:
+          APP_ASSET_DIR: ${{ runner.temp }}/app-release-assets
         run: >-
           python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name stage-app-assets
           --log-dir "$RUNNER_TEMP/app-release-logs" --
@@ -190,6 +191,7 @@ jobs:
         run: python -I -B "$RUNNER_TEMP/trusted/snapshot_trusted.py" verify --dest "$RUNNER_TEMP/trusted"
       - name: Publish only verified assets to the unpublished new-app draft
         env:
+          APP_ASSET_DIR: ${{ runner.temp }}/app-release-assets
           GH_TOKEN: ${{ secrets.PUBLISH_RELEASES_TOKEN }}
           APP_RELEASE_REPOSITORY: ${{ needs.identity.outputs.release_repository }}
           APP_RELEASE_REPOSITORY_ID: ${{ needs.identity.outputs.release_repository_id }}

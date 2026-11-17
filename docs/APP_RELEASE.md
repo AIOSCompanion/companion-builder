@@ -98,6 +98,9 @@ temporarily enables/restores the runner's existing `SeRestorePrivilege` for thos
 changes; a process lacking that privilege fails closed. This avoids treating an
 `icacls /C` zero exit status as proof of ownership. See Microsoft's
 [ownership API contract](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-setnamedsecurityinfow).
+The native permission setter replaces the entire protected DACL with SYSTEM full
+access and the runner SID read/execute access; image-specific explicit grants
+are removed instead of merely turning off inheritance.
 
 This is a trusted-tagged-code release lane. These protections catch ordinary
 writes and changed snapshot content; they do not isolate malicious code running
