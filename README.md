@@ -88,6 +88,11 @@ Timeouts remain failures; diagnostic runs do not bypass the test or release gate
 
 - `release.yml`: release builds for a tag on the private repository. Dispatch only, from this repository's
   default branch, into the `release-signing` environment, which needs an approval.
+- `release-app.yml`: the separate Go/Wails app route for reviewed `companion-engine` tags. It requires
+  an explicitly configured, separate public artifact repository. Builds run without signing/publish
+  credentials; publication steps upload only allowlisted executables, ZIPs, checksums and receipts.
+  Both native rows must pass before final draft verification. It always leaves an unpublished draft.
+  See [the new app release contract](docs/APP_RELEASE.md) for configuration and outstanding acceptance gates.
 - `test.yml`: PR tests for a PR head SHA on a private repository. Dispatch only. No `pull_request` trigger.
 - `catch-up.yml`: expands a truncated push into individual test dispatches, after
   `source-access` owner approval. The external bridge cannot read private commit history.
@@ -98,11 +103,11 @@ Timeouts remain failures; diagnostic runs do not bypass the test or release gate
 
 ## Residuals
 
-- The publish token (PUBLISH_RELEASES_TOKEN) is in the signing-and-build step's environment, because electron-builder
+- In the existing Electron `release.yml`, the publish token (PUBLISH_RELEASES_TOKEN) is in the signing-and-build step's environment, because electron-builder
   publishes the bundles with it. That build runs our own tagged code, so it falls under the dependency residual
   below. The token is not in any test step, and the test user cannot read it.
 
-- A dependency that runs code during a release build can read the signing material while the build runs. It
+- In that existing Electron route, a dependency that runs code during a release build can read the signing material while the build runs. It
   cannot read the team log key, and its output is sealed.
 - The runner's home directory is locked to mode 711 where the image allows, so the test user can traverse it but not
   list it. The probe reports the result either way. The runner's install-directory files (.runner, .credentials,

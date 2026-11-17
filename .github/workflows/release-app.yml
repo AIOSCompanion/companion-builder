@@ -1,0 +1,245 @@
+name: Companion Go app release builds
+
+# New app only. The existing Electron workflow and updater feed are unchanged.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Reviewed version tag in the private companion-engine repository
+        required: true
+        type: string
+      expected_sha:
+        description: Optional immutable tag-object SHA; a moved tag is refused
+        required: false
+        default: ''
+        type: string
+      allow_unsigned_macos_test:
+        description: Explicitly create a labelled UNSIGNED macOS test draft instead of signing
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: companion-go-release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  identity:
+    if: github.repository == 'AIOSCompanion/companion-builder' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: release-signing
+    timeout-minutes: 10
+    outputs:
+      commit_sha: ${{ steps.identity.outputs.commit_sha }}
+      tag_object_sha: ${{ steps.identity.outputs.tag_object_sha }}
+      release_repository: ${{ steps.identity.outputs.release_repository }}
+      release_repository_id: ${{ steps.identity.outputs.release_repository_id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Import the team public log key
+        env:
+          TEST_LOG_PUBLIC_KEY: ${{ vars.TEST_LOG_PUBLIC_KEY }}
+        run: printf '%s\n' "$TEST_LOG_PUBLIC_KEY" | gpg --batch --import >/dev/null 2>&1
+      - name: Create a read-only source identity token
+        id: source-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510
+        with:
+          app-id: ${{ vars.BUILDER_APP_ID }}
+          private-key: ${{ secrets.BUILDER_APP_PRIVATE_KEY }}
+          owner: AIOSCompanion
+          repositories: companion-engine
+          permission-contents: read
+      - name: Verify the immutable source tag and explicitly configured public destination
+        id: identity
+        env:
+          GH_TOKEN: ${{ steps.source-token.outputs.token }}
+          TAG: ${{ inputs.tag }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          APP_RELEASE_REPOSITORY: ${{ vars.APP_RELEASE_REPOSITORY }}
+          APP_RELEASE_REPOSITORY_ID: ${{ vars.APP_RELEASE_REPOSITORY_ID }}
+        run: python3 -I -B scripts/app_release_identity.py
+      - name: Create or verify the isolated unpublished draft
+        env:
+          GH_TOKEN: ${{ secrets.PUBLISH_RELEASES_TOKEN }}
+          TAG: ${{ inputs.tag }}
+          SOURCE_SHA: ${{ steps.identity.outputs.commit_sha }}
+          APP_RELEASE_REPOSITORY: ${{ steps.identity.outputs.release_repository }}
+          APP_RELEASE_REPOSITORY_ID: ${{ steps.identity.outputs.release_repository_id }}
+          UNSIGNED_MACOS_TEST: ${{ inputs.allow_unsigned_macos_test }}
+          LOG_RECIPIENT: ${{ vars.TEST_LOG_RECIPIENT }}
+        run: >-
+          python3 -I -B scripts/run_sealed.py --name create-app-draft
+          --log-dir "$RUNNER_TEMP/app-release-logs" --
+          python3 -I -B scripts/app_release.py draft
+      - name: Retain only encrypted identity logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sealed-app-identity
+          path: ${{ runner.temp }}/app-release-logs/*.gpg
+          retention-days: 1
+          if-no-files-found: ignore
+
+  build:
+    needs: identity
+    environment: release-signing
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-amd64
+            os: windows-2022
+          - platform: darwin-arm64
+            os: macos-15
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      TAG: ${{ inputs.tag }}
+      SOURCE_SHA: ${{ needs.identity.outputs.commit_sha }}
+      TAG_OBJECT_SHA: ${{ needs.identity.outputs.tag_object_sha }}
+      APP_SOURCE_DIR: ${{ github.workspace }}/source
+      APP_ASSET_DIR: ${{ runner.temp }}/app-release-assets
+      UNSIGNED_MACOS_TEST: ${{ inputs.allow_unsigned_macos_test }}
+      LOG_RECIPIENT: ${{ vars.TEST_LOG_RECIPIENT }}
+      GOTOOLCHAIN: local
+    steps:
+      - name: Check out the trusted public builder at this workflow commit
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Protect the trusted scripts before any private code is present
+        run: python -I -B scripts/app_release_snapshot.py "$RUNNER_TEMP/trusted"
+      - name: Import the team public log key
+        env:
+          TEST_LOG_PUBLIC_KEY: ${{ vars.TEST_LOG_PUBLIC_KEY }}
+        run: printf '%s\n' "$TEST_LOG_PUBLIC_KEY" | gpg --batch --import >/dev/null 2>&1
+      - name: Create a read-only source checkout token
+        id: source-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510
+        with:
+          app-id: ${{ vars.BUILDER_APP_ID }}
+          private-key: ${{ secrets.BUILDER_APP_PRIVATE_KEY }}
+          owner: AIOSCompanion
+          repositories: companion-engine
+          permission-contents: read
+      - name: Check out private source at the validated immutable commit
+        env:
+          GH_TOKEN: ${{ steps.source-token.outputs.token }}
+        run: >-
+          python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name checkout-private-app
+          --log-dir "$RUNNER_TEMP/app-release-logs" --
+          python -I -B "$RUNNER_TEMP/trusted/app_release.py" checkout
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.4'
+          cache: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.23.4'
+      - name: Recheck the checkout and exact tag before building
+        run: >-
+          python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name app-source-preflight
+          --log-dir "$RUNNER_TEMP/app-release-logs" --
+          python -I -B "$RUNNER_TEMP/trusted/app_release.py" preflight
+      - name: Build without publisher or signing credentials
+        run: >-
+          python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name build-app
+          --log-dir "$RUNNER_TEMP/app-release-logs" --
+          python -I -B "$RUNNER_TEMP/trusted/app_release.py" build --platform "${{ matrix.platform }}"
+      - name: Verify the packaged Windows window and resident engine in a fresh home
+        if: matrix.platform == 'windows-amd64'
+        run: >-
+          python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name verify-windows-app
+          --log-dir "$RUNNER_TEMP/app-release-logs" --
+          python -I -B "$RUNNER_TEMP/trusted/app_release.py" check-windows
+      - name: Sign notarize and staple the macOS arm64 bundle
+        if: matrix.platform == 'darwin-arm64' && !inputs.allow_unsigned_macos_test
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: >-
+          python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name sign-notarize-app
+          --log-dir "$RUNNER_TEMP/app-release-logs" --
+          python -I -B "$RUNNER_TEMP/trusted/app_release.py" sign-macos
+      - name: Package the explicitly requested unsigned macOS test build
+        if: matrix.platform == 'darwin-arm64' && inputs.allow_unsigned_macos_test
+        run: >-
+          python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name unsigned-macos-test
+          --log-dir "$RUNNER_TEMP/app-release-logs" --
+          python -I -B "$RUNNER_TEMP/trusted/app_release.py" unsigned-macos
+      - name: Bind only the expected downloadable assets to this source commit
+        run: >-
+          python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name stage-app-assets
+          --log-dir "$RUNNER_TEMP/app-release-logs" --
+          python -I -B "$RUNNER_TEMP/trusted/app_release.py" stage --platform "${{ matrix.platform }}"
+      - name: Verify trusted scripts before publication
+        run: python -I -B "$RUNNER_TEMP/trusted/snapshot_trusted.py" verify --dest "$RUNNER_TEMP/trusted"
+      - name: Publish only verified assets to the unpublished new-app draft
+        env:
+          GH_TOKEN: ${{ secrets.PUBLISH_RELEASES_TOKEN }}
+          APP_RELEASE_REPOSITORY: ${{ needs.identity.outputs.release_repository }}
+          APP_RELEASE_REPOSITORY_ID: ${{ needs.identity.outputs.release_repository_id }}
+        run: >-
+          python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name upload-app-assets
+          --log-dir "$RUNNER_TEMP/app-release-logs" --
+          python -I -B "$RUNNER_TEMP/trusted/app_release.py" upload --platform "${{ matrix.platform }}"
+      - name: Verify the trusted snapshot before retaining logs
+        if: always()
+        run: python -I -B "$RUNNER_TEMP/trusted/snapshot_trusted.py" verify --dest "$RUNNER_TEMP/trusted"
+      - name: Retain encrypted logs only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sealed-app-${{ matrix.platform }}
+          path: ${{ runner.temp }}/app-release-logs/*.gpg
+          retention-days: 1
+          if-no-files-found: ignore
+
+  finalize:
+    needs: [identity, build]
+    runs-on: ubuntu-latest
+    environment: release-signing
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Import the team public log key
+        env:
+          TEST_LOG_PUBLIC_KEY: ${{ vars.TEST_LOG_PUBLIC_KEY }}
+        run: printf '%s\n' "$TEST_LOG_PUBLIC_KEY" | gpg --batch --import >/dev/null 2>&1
+      - name: Finalize verified draft metadata while retaining owner publication
+        env:
+          GH_TOKEN: ${{ secrets.PUBLISH_RELEASES_TOKEN }}
+          TAG: ${{ inputs.tag }}
+          SOURCE_SHA: ${{ needs.identity.outputs.commit_sha }}
+          APP_RELEASE_REPOSITORY: ${{ needs.identity.outputs.release_repository }}
+          APP_RELEASE_REPOSITORY_ID: ${{ needs.identity.outputs.release_repository_id }}
+          UNSIGNED_MACOS_TEST: ${{ inputs.allow_unsigned_macos_test }}
+          LOG_RECIPIENT: ${{ vars.TEST_LOG_RECIPIENT }}
+        run: >-
+          python3 -I -B scripts/run_sealed.py --name finalize-app-draft
+          --log-dir "$RUNNER_TEMP/app-release-logs" --
+          python3 -I -B scripts/app_release.py finalize
+      - name: Retain encrypted finalization logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sealed-app-finalize
+          path: ${{ runner.temp }}/app-release-logs/*.gpg
+          retention-days: 1
+          if-no-files-found: ignore

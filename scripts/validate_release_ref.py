@@ -13,10 +13,12 @@ SHA = re.compile(r"[0-9a-f]{40}")
 VERSION = re.compile(r"v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?")
 
 
-def resolve(tag, expected, get):
+def resolve(tag, expected, get, *, repository="AIOSCompanion/aios-desktop-app"):
     if not VERSION.fullmatch(tag) or (expected and not SHA.fullmatch(expected)):
         raise ValueError("invalid release identity")
-    root = "repos/AIOSCompanion/aios-desktop-app/git"
+    if repository not in ("AIOSCompanion/aios-desktop-app", "AIOSCompanion/companion-engine"):
+        raise ValueError("unsupported release source")
+    root = f"repos/{repository}/git"
     obj = get(f"{root}/ref/tags/{tag}")["object"]
     if not SHA.fullmatch(obj.get("sha", "")) or (expected and obj["sha"] != expected):
         raise ValueError("release tag changed")
