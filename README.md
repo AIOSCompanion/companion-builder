@@ -59,6 +59,11 @@ runtime, with memory installed against those constraints, matching the shared in
 standalone lock can pin a different native database version. Tests never resolve packages inside the
 network-isolated suite.
 
+Memory's 116,000-item store measurements run in a separate job on a fresh runner,
+as their wall-clock contract requires. The ordinary memory suite excludes only
+that benchmark file; the separate job runs the entire file with the same latency
+limits. No cases are skipped or retried to hide a timing failure.
+
 Desktop runtime tests run the app's normal dependency installation, including Electron/native modules
 and its canonical archive preparation. The separate typecheck lane avoids those scripts. Desktop tests
 also receive only the pinned engine registry file needed by model contracts; full cross-repository

@@ -24,7 +24,7 @@ SUITES = {
     "companion-memory": [
         {"suite": "memory unit tests (pytest)", "repo": "companion-memory",
          "setup": "pip install --quiet --user uv && uv sync --project ../aiosxaegra --locked && uv export --project ../aiosxaegra --locked --no-hashes --no-emit-project > /tmp/engine-constraints.txt && uv pip install --python ../aiosxaegra/.venv/bin/python --constraint /tmp/engine-constraints.txt --editable '.[dev]' && ln -s ../aiosxaegra/.venv .venv",
-         "run": ".venv/bin/python -m pytest -q --tb=no -p no:cacheprovider --junitxml=junit.xml"},
+         "run": ".venv/bin/python -m pytest --ignore=tests/test_memctx_scale_116k.py -q --tb=no -p no:cacheprovider --junitxml=junit.xml"},
     ],
     "aios-desktop-app": [
         {"suite": "desktop unit tests (vitest)", "repo": "aios-desktop-app",
@@ -35,6 +35,16 @@ SUITES = {
          "setup": "npm ci --ignore-scripts", "run": "npm run typecheck"},
     ],
 }
+
+# These write-lock measurements require an otherwise idle runner. Keep the
+# complete benchmark file in its own job; the other memory job ignores only
+# that file, so existing and future cases still run exactly once.
+_memory = SUITES['companion-memory'][0]
+SUITES['companion-memory'].append(dict(_memory, **{
+    'suite': 'memory 116k-store benchmarks (pytest)',
+    'run': '.venv/bin/python -m pytest tests/test_memctx_scale_116k.py '
+           '-q --tb=short -p no:cacheprovider --junitxml=junit.xml',
+}))
 
 # Native-host/PTY tests are intentionally slow. Every shard collects the complete
 # suite, then hashes node IDs into a disjoint partition; no tests are dropped.
