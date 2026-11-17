@@ -11,6 +11,7 @@ import cloud_ssh
 class CloudSSHTests(unittest.TestCase):
     def config(self):
         return dict(BRIDGE_GCP_PROJECT='example-project', BRIDGE_SSH_HOST='existing.example.com',
+                    GCP_DEPLOY_SERVICE_ACCOUNT='existing-deployer@example-project.iam.gserviceaccount.com',
                     BRIDGE_SSH_KNOWN_HOSTS='existing.example.com ssh-ed25519 SYNTHETIC')
 
     def runner(self, calls, *, registration_failure=False):
@@ -44,6 +45,8 @@ class CloudSSHTests(unittest.TestCase):
                 raise RuntimeError('simulated deployment failure')
         self.assertFalse(temporary_key.exists())
         self.assertIn('--ttl=15m', calls[1])
+        for call in calls[1:]:
+            self.assertIn('--account=existing-deployer@example-project.iam.gserviceaccount.com', call)
         self.assertIn('remove', calls[-1])
 
     def test_registration_failure_never_yields_host_access_or_sensitive_output(self):
@@ -55,7 +58,8 @@ class CloudSSHTests(unittest.TestCase):
 
     def test_missing_pins_and_unsafe_host_fail_before_credentials_are_created(self):
         for field, value in [('BRIDGE_SSH_KNOWN_HOSTS', ''), ('BRIDGE_SSH_HOST', '-oProxyCommand=bad'),
-                             ('BRIDGE_GCP_PROJECT', 'project;bad')]:
+                             ('BRIDGE_GCP_PROJECT', 'project;bad'),
+                             ('GCP_DEPLOY_SERVICE_ACCOUNT', 'other@untrusted.iam.gserviceaccount.com')]:
             env = self.config()
             env[field] = value
             with self.assertRaises(ValueError):

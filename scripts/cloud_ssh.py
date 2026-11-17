@@ -10,13 +10,20 @@ import tempfile
 
 @contextmanager
 def access(env, run=subprocess.run):
-    required = ('BRIDGE_GCP_PROJECT', 'BRIDGE_SSH_HOST', 'BRIDGE_SSH_KNOWN_HOSTS')
+    required = ('BRIDGE_GCP_PROJECT', 'BRIDGE_SSH_HOST', 'BRIDGE_SSH_KNOWN_HOSTS', 'GCP_DEPLOY_SERVICE_ACCOUNT')
     if any(not env.get(name) for name in required):
         raise ValueError('Missing cloud SSH configuration')
     if not re.fullmatch(r'[a-z][a-z0-9-]{4,61}[a-z0-9]', env['BRIDGE_GCP_PROJECT']):
         raise ValueError('Invalid project')
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9.-]*', env['BRIDGE_SSH_HOST']):
         raise ValueError('Invalid host')
+    if not re.fullmatch(r'[a-z][a-z0-9-]*@' + re.escape(env['BRIDGE_GCP_PROJECT']) + r'\.iam\.gserviceaccount\.com', env['GCP_DEPLOY_SERVICE_ACCOUNT']):
+        raise ValueError('Invalid deployment service account')
+    # gcloud derives the OS Login user from core/account. WIF sets that label
+    # to the federated principal even when its credential file impersonates a
+    # service account. Select the existing SA explicitly; the authenticated
+    # credential-file override still supplies the short-lived job credentials.
+    account = '--account=' + env['GCP_DEPLOY_SERVICE_ACCOUNT']
     with tempfile.TemporaryDirectory(prefix='builder-oslogin-') as temporary:
         folder = Path(temporary)
         folder.chmod(0o700)
@@ -30,7 +37,7 @@ def access(env, run=subprocess.run):
         try:
             result = run(['gcloud', 'compute', 'os-login', 'ssh-keys', 'add',
                           '--key-file=' + str(key.with_suffix('.pub')), '--ttl=15m',
-                          '--project=' + env['BRIDGE_GCP_PROJECT'], '--format=json', '--quiet'],
+                          '--project=' + env['BRIDGE_GCP_PROJECT'], account, '--format=json', '--quiet'],
                          capture_output=True, text=True, timeout=60, check=False)
             if result.returncode:
                 raise RuntimeError('Temporary OS Login registration failed; output withheld')
@@ -52,7 +59,7 @@ def access(env, run=subprocess.run):
         finally:
             if registered:
                 result = run(['gcloud', 'compute', 'os-login', 'ssh-keys', 'remove',
-                              '--key=' + public, '--project=' + env['BRIDGE_GCP_PROJECT'], '--quiet'],
+                              '--key=' + public, '--project=' + env['BRIDGE_GCP_PROJECT'], account, '--quiet'],
                              capture_output=True, timeout=60, check=False)
                 if result.returncode:
                     raise RuntimeError('Temporary key cleanup failed; key expires within 15 minutes')
