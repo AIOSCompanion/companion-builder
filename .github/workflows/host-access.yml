@@ -1,6 +1,6 @@
 name: Inspect existing bridge host access
 
-# Read-only probe using the existing cloud identity. No private source checkout.
+# Inspects the existing host with temporary OS Login credentials. No private checkout.
 on:
   workflow_dispatch:
 
@@ -44,18 +44,16 @@ jobs:
           gcloud compute instances describe "$TARGET_INSTANCE"
           --project="$TARGET_PROJECT" --zone="$TARGET_ZONE"
           --format='json(name,status,networkInterfaces,zone)' --quiet
-      - name: Read authenticated SSH host public keys into a sealed report
+      - name: Verify administrative SSH using authenticated, pinned host keys
         env:
-          TARGET_PROJECT: ${{ secrets.BRIDGE_GCP_PROJECT }}
-          TARGET_ZONE: ${{ secrets.BRIDGE_GCP_ZONE }}
-          TARGET_INSTANCE: ${{ secrets.BRIDGE_GCP_INSTANCE }}
+          BRIDGE_GCP_PROJECT: ${{ secrets.BRIDGE_GCP_PROJECT }}
+          BRIDGE_SSH_HOST: ${{ secrets.BRIDGE_SSH_HOST }}
+          BRIDGE_SSH_KNOWN_HOSTS: ${{ secrets.BRIDGE_SSH_KNOWN_HOSTS }}
           LOG_RECIPIENT: ${{ vars.TEST_LOG_RECIPIENT }}
         run: >-
-          python3 -I -B scripts/run_sealed.py --name host-public-keys
+          python3 -I -B scripts/run_sealed.py --name pinned-host-login
           --log-dir "$RUNNER_TEMP/host-reports" --
-          gcloud compute instances get-guest-attributes "$TARGET_INSTANCE"
-          --project="$TARGET_PROJECT" --zone="$TARGET_ZONE"
-          --query-path=hostkeys/ --format=json --quiet
+          python3 -B scripts/cloud_ssh.py
       - name: Retain only encrypted probe reports
         if: always()
         uses: actions/upload-artifact@v4
