@@ -1,0 +1,49 @@
+name: Inspect existing production runtime through the public builder
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: bridge-deploy
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Import the public log key
+        env:
+          PUBLIC_LOG_KEY: ${{ vars.TEST_LOG_PUBLIC_KEY }}
+        run: printf '%s\n' "$PUBLIC_LOG_KEY" | gpg --batch --import >/dev/null 2>&1
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          project_id: ${{ secrets.BRIDGE_GCP_PROJECT }}
+      - name: Read deployment metadata and operation markers into an encrypted report
+        env:
+          GCP_DEPLOY_SERVICE_ACCOUNT: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          BRIDGE_GCP_PROJECT: ${{ secrets.BRIDGE_GCP_PROJECT }}
+          BRIDGE_SSH_HOST: ${{ secrets.BRIDGE_SSH_HOST }}
+          BRIDGE_SSH_KNOWN_HOSTS: ${{ secrets.BRIDGE_SSH_KNOWN_HOSTS }}
+          LOG_RECIPIENT: ${{ vars.TEST_LOG_RECIPIENT }}
+        run: >-
+          python3 -I -B scripts/run_sealed.py --name runtime-inventory
+          --log-dir "$RUNNER_TEMP/runtime-reports" --
+          python3 -B scripts/cloud_runtime_inventory.py
+      - name: Retain only encrypted inventory
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sealed-runtime-inventory
+          path: ${{ runner.temp }}/runtime-reports/*.gpg
+          retention-days: 1
