@@ -62,13 +62,18 @@ and the existing database are retained. Keys travel via stdin, never argv or log
 The service listens ONLY on 127.0.0.1:8123. Configure the host's existing TLS proxy
 with a dedicated HTTPS route, a 25MB request limit and body timeout. No new hosting
 plan is purchased by this code. The deploy workflow does not modify production
-proxy routes, firewalls or certificates. Keep the bridge disabled until HTTPS is
+proxy routes, firewalls or certificates. The separate approved `bridge-proxy.yml`
+workflow adds `/builder/webhook` and bearer-protected `/builder/delivery/` routes
+to the existing TLS server using BRIDGE_PUBLIC_HOST and BRIDGE_NGINX_SITE secrets.
+It retains a private backup, validates nginx before reload and restores the prior
+configuration if validation or reload fails. Existing backend routing remains in
+place. Keep the bridge disabled until HTTPS is
 ready. Disabled mode refuses new deliveries and retains pending retry work.
 
 Run only the public builder's bridge-deploy.yml from main. It defaults enable=false,
 stops the prior receiver before installing its complete configuration, then starts
 and checks local readiness. configure each private source repository webhook with
-the HTTPS /webhook endpoint, the shared webhook secret, and push/PR events.
+the HTTPS /builder/webhook endpoint, the shared webhook secret, and push/PR events.
 
 ## Acceptance gates
 

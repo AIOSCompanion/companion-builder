@@ -1,0 +1,40 @@
+name: Configure the existing TLS proxy for the builder bridge
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bridge-deploy
+  cancel-in-progress: false
+
+jobs:
+  configure:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: bridge-deploy
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          project_id: ${{ secrets.BRIDGE_GCP_PROJECT }}
+      - name: Add dedicated bridge routes with backup, validation and rollback
+        env:
+          GCP_DEPLOY_SERVICE_ACCOUNT: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          BRIDGE_GCP_PROJECT: ${{ secrets.BRIDGE_GCP_PROJECT }}
+          BRIDGE_SSH_HOST: ${{ secrets.BRIDGE_SSH_HOST }}
+          BRIDGE_SSH_KNOWN_HOSTS: ${{ secrets.BRIDGE_SSH_KNOWN_HOSTS }}
+          BRIDGE_PUBLIC_HOST: ${{ secrets.BRIDGE_PUBLIC_HOST }}
+          BRIDGE_NGINX_SITE: ${{ secrets.BRIDGE_NGINX_SITE }}
+        run: python3 -B scripts/configure_bridge_proxy.py
