@@ -22,7 +22,8 @@ SUITES = {
                   " && if [ -f ui/package.json ]; then npm --prefix ui ci --ignore-scripts --no-audit --no-fund; fi",
          # The validator calibration measures elapsed time and needs an idle runner.
          "run": "GOTOOLCHAIN=local GOWORK=off GOPROXY=off go test -mod=readonly -count=1 -p 1 ./..."
-                " && if [ -f ui/package.json ]; then npm --prefix ui run check:protocol && npm --prefix ui run build; fi"},
+                " && if [ -f ui/package.json ]; then npm --prefix ui run check:protocol && npm --prefix ui run build"
+                " && npm --prefix ui run test --if-present -- --passWithNoTests; fi"},
     ],
     "aiosxaegra": [
         {"suite": "engine unit tests (pytest)", "repo": "aiosxaegra",
