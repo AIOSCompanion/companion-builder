@@ -50,6 +50,7 @@ class PlanTests(unittest.TestCase):
         self.assertIn("go mod download", suite["setup"])
         self.assertIn("GOPROXY=off go test -mod=readonly", suite["run"])
         self.assertIn("npm --prefix ui run check:protocol && npm --prefix ui run build", suite["run"])
+        self.assertIn("npm --prefix ui run test --if-present -- --passWithNoTests", suite["run"])
         status = post_status.gh_args("companion-engine", SHA, "success", "https://example.test/run")
         self.assertIn(f"repos/AIOSCompanion/companion-engine/statuses/{SHA}", status)
 
