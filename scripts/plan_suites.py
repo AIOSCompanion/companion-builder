@@ -20,7 +20,8 @@ SUITES = {
         {"suite": "Go engine and renderer checks", "repo": "companion-engine",
          "setup": "GOTOOLCHAIN=local GOWORK=off go mod download"
                   " && if [ -f ui/package.json ]; then npm --prefix ui ci --ignore-scripts --no-audit --no-fund; fi",
-         "run": "GOTOOLCHAIN=local GOWORK=off GOPROXY=off go test -mod=readonly -count=1 ./..."
+         # The validator calibration measures elapsed time and needs an idle runner.
+         "run": "GOTOOLCHAIN=local GOWORK=off GOPROXY=off go test -mod=readonly -count=1 -p 1 ./..."
                 " && if [ -f ui/package.json ]; then npm --prefix ui run check:protocol && npm --prefix ui run build; fi"},
     ],
     "aiosxaegra": [
