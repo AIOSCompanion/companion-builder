@@ -2,7 +2,7 @@
 """Post companion-builder/tests on the private PR head commit.
 
 Reads REPOSITORY, SHA, RUN_URL, NEEDS_RESULT and GH_TOKEN (the status-only App token, created in this step
-alone). Refuses a repository outside the three private repos or a SHA that is not 40 hex characters.
+alone). Refuses a repository outside the private repo allowlist or a SHA that is not 40 hex characters.
 The description carries no test name and no output.
 """
 from __future__ import annotations
@@ -12,7 +12,7 @@ import re
 import subprocess
 import sys
 
-REPOSITORIES = ("aios-desktop-app", "aiosxaegra", "companion-memory")
+REPOSITORIES = ("aios-desktop-app", "aiosxaegra", "companion-memory", "companion-engine")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 

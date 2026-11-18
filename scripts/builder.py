@@ -12,7 +12,7 @@ import subprocess
 import sys
 
 BUILDER = "AIOSCompanion/companion-builder"
-REPOSITORIES = ("aios-desktop-app", "aiosxaegra", "companion-memory")
+REPOSITORIES = ("aios-desktop-app", "aiosxaegra", "companion-memory", "companion-engine")
 RELEASE_SECRETS = {"APPLE_API_KEY", "APPLE_API_KEY_ID", "APPLE_API_ISSUER", "CSC_LINK",
                    "CSC_KEY_PASSWORD", "DOTENV_PRODUCTION_B64", "SENTRY_AUTH_TOKEN",
                    "PUBLISH_RELEASES_TOKEN"}

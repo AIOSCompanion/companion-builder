@@ -5,7 +5,7 @@ on:
     inputs:
       repository:
         type: choice
-        options: [aios-desktop-app, aiosxaegra, companion-memory]
+        options: [aios-desktop-app, aiosxaegra, companion-memory, companion-engine]
         required: true
       before_sha:
         type: string

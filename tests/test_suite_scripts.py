@@ -45,6 +45,14 @@ class PlanTests(unittest.TestCase):
         with self.assertRaisesRegex(plan_suites.PlanError, "unknown repository"):
             plan_suites.matrix_for("some-other-repo")
 
+    def test_go_tests_run_offline_and_compile_the_renderer_when_present(self):
+        suite, = plan_suites.SUITES["companion-engine"]
+        self.assertIn("go mod download", suite["setup"])
+        self.assertIn("GOPROXY=off go test -mod=readonly", suite["run"])
+        self.assertIn("npm --prefix ui run check:protocol && npm --prefix ui run build", suite["run"])
+        status = post_status.gh_args("companion-engine", SHA, "success", "https://example.test/run")
+        self.assertIn(f"repos/AIOSCompanion/companion-engine/statuses/{SHA}", status)
+
     def test_the_matrix_is_written_to_github_output(self):
         with tempfile.TemporaryDirectory(prefix="plan ") as temp:
             out = Path(temp) / "output"

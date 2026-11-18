@@ -16,6 +16,13 @@ from pathlib import Path
 import sys
 
 SUITES = {
+    "companion-engine": [
+        {"suite": "Go engine and renderer checks", "repo": "companion-engine",
+         "setup": "GOTOOLCHAIN=local GOWORK=off go mod download"
+                  " && if [ -f ui/package.json ]; then npm --prefix ui ci --ignore-scripts --no-audit --no-fund; fi",
+         "run": "GOTOOLCHAIN=local GOWORK=off GOPROXY=off go test -mod=readonly -count=1 ./..."
+                " && if [ -f ui/package.json ]; then npm --prefix ui run check:protocol && npm --prefix ui run build; fi"},
+    ],
     "aiosxaegra": [
         {"suite": "engine unit tests (pytest)", "repo": "aiosxaegra",
          # This suite collects the cloud worker tests too. Match the canonical locked

@@ -5,7 +5,7 @@ import re
 import subprocess
 import sys
 
-REPOSITORIES = ("aios-desktop-app", "aiosxaegra", "companion-memory")
+REPOSITORIES = ("aios-desktop-app", "aiosxaegra", "companion-memory", "companion-engine")
 SHA = re.compile(r"[0-9a-f]{40}")
 ZERO = "0" * 40
 
