@@ -191,6 +191,8 @@ class BuilderTests(unittest.TestCase):
         self.assertIn("ln -s ../aiosxaegra/.venv .venv", memory_setup)
         for suite in plan.SUITES['aiosxaegra']:
             self.assertIn('--editable ../companion-memory', suite['setup'])
+            self.assertIn('uv sync --locked --extra voice-worker', suite['setup'])
+            self.assertIn('uv export --locked --extra voice-worker', suite['setup'])
         workflow = yaml.safe_load((ROOT / '.github/workflows/test.yml').read_text())
         checkout = next(step for step in workflow['jobs']['suite']['steps'] if step.get('with', {}).get('path') == 'pr')
         self.assertEqual(checkout['with']['fetch-depth'], "${{ inputs.repository != 'aios-desktop-app' && '0' || '1' }}")
