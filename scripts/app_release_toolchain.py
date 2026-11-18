@@ -9,8 +9,10 @@ which could be a major the UI was never built with; the preflight then checks th
 floor. Any other range is refused rather than guessed.
 """
 import json
+import os
 from pathlib import Path
 import re
+import sys
 
 
 def go_version(text):
@@ -68,3 +70,13 @@ def resolve(source):
     """{go_version, node_version} for setup-go and setup-node."""
     return {"go_version": go_version(read(source, "go.mod")),
             "node_version": node_setup_version(node_spec(read(source, "ui/package.json")))}
+
+
+if __name__ == "__main__":
+    try:
+        version = go_version(read(Path(sys.argv[1]), "go.mod"))
+        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+            output.write(f"go_version={version}\n")
+    except (IndexError, KeyError, OSError, ValueError):
+        print("Could not validate the Go version from the source checkout.", file=sys.stderr)
+        sys.exit(1)

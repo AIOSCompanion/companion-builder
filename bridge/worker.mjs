@@ -1,7 +1,7 @@
 // GitHub App webhook receiver. No product source, commit messages or payload logging.
 const OWNER = "AIOSCompanion";
 const BUILDER = `${OWNER}/companion-builder`;
-const SOURCES = new Set(["aios-desktop-app", "aiosxaegra", "companion-memory"]);
+const SOURCES = new Set(["aios-desktop-app", "aiosxaegra", "companion-memory", "companion-engine"]);
 const SHA = /^[0-9a-f]{40}$/;
 const VERSION = /^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 const ZERO = "0".repeat(40);

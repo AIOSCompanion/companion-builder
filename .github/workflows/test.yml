@@ -17,7 +17,7 @@ on:
         description: Private repository that holds the PR
         required: true
         type: choice
-        options: [aios-desktop-app, aiosxaegra, companion-memory]
+        options: [aios-desktop-app, aiosxaegra, companion-memory, companion-engine]
       head_sha:
         description: Full 40-character head commit SHA of the PR
         required: true
@@ -101,7 +101,7 @@ jobs:
           owner: AIOSCompanion
           repositories: |
             ${{ inputs.repository }}
-            ${{ inputs.repository == 'aiosxaegra' && 'companion-memory' || 'aiosxaegra' }}
+            ${{ inputs.repository == 'aiosxaegra' && 'companion-memory' || (inputs.repository != 'companion-engine' && 'aiosxaegra' || '') }}
             ${{ inputs.repository == 'aiosxaegra' && 'aios-desktop-app' || '' }}
           permission-contents: read
 
@@ -116,7 +116,7 @@ jobs:
           persist-credentials: false
 
       - name: Resolve the suite engine peer to an immutable commit
-        if: matrix.repo != 'aiosxaegra'
+        if: matrix.repo == 'aios-desktop-app' || matrix.repo == 'companion-memory'
         id: engine-peer
         env:
           GH_TOKEN: ${{ steps.checkout-token.outputs.token }}
@@ -192,13 +192,25 @@ jobs:
         run: printf '%s\n' "$TEST_LOG_PUBLIC_KEY" | gpg --batch --import >/dev/null 2>&1
 
       - name: Set up Node
-        if: matrix.repo == 'aios-desktop-app'
+        if: matrix.repo == 'aios-desktop-app' || matrix.repo == 'companion-engine'
         uses: actions/setup-node@v4
         with:
           node-version: '22'
 
+      - name: Validate the Go version pinned by the source
+        if: matrix.repo == 'companion-engine'
+        id: go-version
+        run: python3 -I -B "$RUNNER_TEMP/trusted/app_release_toolchain.py" pr
+
+      - name: Set up the validated Go toolchain
+        if: matrix.repo == 'companion-engine'
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ steps.go-version.outputs.go_version }}
+          cache: false
+
       - name: Set up Python
-        if: matrix.repo != 'aios-desktop-app'
+        if: matrix.repo == 'aiosxaegra' || matrix.repo == 'companion-memory'
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -218,7 +230,7 @@ jobs:
         run: python3 -I -B "$RUNNER_TEMP/trusted/prepare_untrusted.py" --user pr-tests --checkout companion-memory --home "$HOME"
 
       - name: Hand the suite engine peer to the same test user
-        if: matrix.repo != 'aiosxaegra'
+        if: matrix.repo == 'aios-desktop-app' || matrix.repo == 'companion-memory'
         run: python3 -I -B "$RUNNER_TEMP/trusted/prepare_untrusted.py" --user pr-tests --checkout aiosxaegra --home "$HOME"
 
       # The PR's install runs as the test user: it keeps egress (the only step that may fetch packages), and its

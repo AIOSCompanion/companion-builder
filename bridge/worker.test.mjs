@@ -66,6 +66,21 @@ test("PR heads run only for the same private repo; forks and closed PRs do not r
   assert.equal(envelope("pull_request", { ...pr, pull_request: { head: { sha: a, repo: { full_name: "other/fork" } } } }), null);
 });
 
+test("Go commits use public tests for branch and PR events and ignore release tags", async () => {
+  const goRepo = { ...repository, name: "companion-engine", full_name: "AIOSCompanion/companion-engine" };
+  for (const ref of ["refs/heads/main", "refs/heads/feature/go"]) {
+    assert.deepEqual(envelope("push", { ...push, repository: goRepo, ref }).commits, [a, b]);
+  }
+  assert.equal(envelope("push", { ...push, repository: goRepo, ref: "refs/tags/v1.2.3", before: zero }), null);
+  const pr = { repository: goRepo, action: "opened", pull_request: { head: { sha: a, repo: goRepo } } };
+  assert.deepEqual(envelope("pull_request", pr).commits, [a]);
+  await dispatch({ repo: goRepo.name, sha: b }, "synthetic-token", async (url, options) => {
+    assert.match(url, /\/companion-builder\/actions\/workflows\/test\.yml\/dispatches$/);
+    assert.deepEqual(JSON.parse(options.body), { ref: "main", inputs: { repository: goRepo.name, head_sha: b } });
+    return new Response(null, { status: 204 });
+  });
+});
+
 test("truncated push payloads require paginated expansion", () => {
   assert.equal(envelope("push", { ...push, commits: Array(2048).fill({ id: a }) }).expand, true);
 });
