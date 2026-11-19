@@ -1,12 +1,15 @@
 """Build the legacy Companion MCP resources on the same native runner as Go."""
 import hashlib
 from pathlib import Path, PurePosixPath
+import plistlib
 import shutil
+import sys
 import tarfile
 import tempfile
 from urllib.request import urlopen
 import zipfile
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from app_release_artifacts import digest, version
 from app_release_checkout import RESOURCE_SHA
 from app_release import checked
@@ -72,6 +75,17 @@ def runtime_filter(allowed):
     return admit
 
 
+def extract_runtimes(destination, platform):
+    name, archive_digest, length, allowed = PLATFORM_INPUTS[platform]
+    with tempfile.TemporaryDirectory(prefix="companion-runtime-") as temporary:
+        archive = Path(temporary) / name
+        download_asset(archive, RUNTIME_URL + name, archive_digest, length)
+        with tarfile.open(archive, "r:gz") as package:
+            package.extractall(destination, filter=runtime_filter(allowed))
+        if platform == "windows-amd64":
+            stage_windows_node(destination / "external_runtimes", Path(temporary))
+
+
 def stage_resources(source, env, tag, platform):
     legacy = Path(env["GITHUB_WORKSPACE"]).resolve(strict=True) / "resource-source"
     if not legacy.is_dir() or legacy.is_symlink():
@@ -86,15 +100,8 @@ def stage_resources(source, env, tag, platform):
     )}
     child.pop("NoDefaultCurrentDirectoryInExePath", None)
     runtimes = legacy / "external_runtimes"
-    name, archive_digest, length, allowed = PLATFORM_INPUTS[platform]
     windows = platform == "windows-amd64"
-    with tempfile.TemporaryDirectory(prefix="companion-runtime-") as temporary:
-        archive = Path(temporary) / name
-        download_asset(archive, RUNTIME_URL + name, archive_digest, length)
-        with tarfile.open(archive, "r:gz") as package:
-            package.extractall(legacy, filter=runtime_filter(allowed))
-        if windows:
-            stage_windows_node(runtimes, Path(temporary))
+    extract_runtimes(legacy, platform)
     npm = "npm.cmd" if windows else "npm"
     checked([npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund"], cwd=legacy / "connectors", env=child)
     checked(["node", "connectors/build.mjs", "--stage"], cwd=legacy, env=child)
@@ -132,3 +139,25 @@ def check_macos_runtimes(resources, env=None):
              "import sys; sys.path.insert(0, sys.argv[1]); import mcp.server.fastmcp, uiautomator2",
              str(resources / "android_mcp_deps/python-deps")], env=env, timeout=30)
     checked([str(adb), "version"], env=env, timeout=30)
+
+
+def macos_public_smoke():
+    """Check the public archive and the actual Node signing recipe on arm64."""
+    with tempfile.TemporaryDirectory(prefix="companion-mac-inputs-") as temporary:
+        root = Path(temporary)
+        extract_runtimes(root, "darwin-arm64")
+        node = root / "external_runtimes/node-mac-arm64/bin/node"
+        python = root / "external_runtimes/python-mac-arm64/bin/python"
+        checked([str(python), "-I", "-S", "-B", "-c",
+                 "import platform,sys; assert platform.machine()=='arm64' and sys.version_info[:2]==(3,11)"])
+        entitlements = root / "jit.plist"
+        entitlements.write_bytes(plistlib.dumps({"com.apple.security.cs.allow-jit": True}))
+        checked(["codesign", "--force", "--sign", "-", "--options", "runtime", "--entitlements",
+                 str(entitlements), str(node)])
+        checked(["codesign", "--verify", "--strict", str(node)])
+        checked([str(node), "-e", "if (process.arch !== 'arm64' || [1,2,3].map(n => n*n).join() !== '1,4,9') process.exit(1)"])
+    print("Pinned Mac runtime archive, Python alias and hardened Node checked on arm64")
+
+
+if __name__ == "__main__":
+    macos_public_smoke()
