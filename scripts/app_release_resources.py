@@ -138,8 +138,9 @@ def stage_resources(source, env, tag, platform):
             git = shutil.which("git.exe", path=child.get("PATH"))
             if not git:
                 raise ValueError("Git for Windows is required for the Android staging script")
-            bash = str(Path(git).resolve().parent.parent / "bin" / "bash.exe")
-            if not Path(bash).is_file():
+            locations = (parent / "bin" / "bash.exe" for parent in Path(git).resolve().parents[:3])
+            bash = next((str(path) for path in locations if path.is_file()), None)
+            if bash is None:
                 raise ValueError("The Git for Windows Bash executable was not found")
         checked([bash, "scripts/release/row_android.sh"], cwd=legacy, env=row)
 
