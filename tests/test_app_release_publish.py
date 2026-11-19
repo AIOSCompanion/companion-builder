@@ -205,11 +205,16 @@ class AppDraftTests(unittest.TestCase):
             with patch("app_release_publish.draft", return_value=release), \
                     patch("app_release_publish.subprocess.run", side_effect=download), \
                     patch("app_release_publish.api") as api:
+                api.return_value = {"id": 77, "draft": True, "tag_name": "v1.2.3"}
                 finalize(self.TARGET, "v1.2.3", self.SHA)
                 self.assertEqual(api.call_count, 1)
                 method, path, payload = api.call_args.args
                 self.assertEqual((method, path), ("PATCH", f"repos/{self.TARGET}/releases/77"))
                 self.assertIs(payload["draft"], True)
+                self.assertEqual(payload["tag_name"], "v1.2.3")
+                api.return_value["tag_name"] = "untagged-fixture"
+                with self.assertRaisesRegex(ValueError, "retain the identity"):
+                    finalize(self.TARGET, "v1.2.3", self.SHA)
                 api.reset_mock()
                 next(asset for asset in assets if asset["name"].endswith("_windows_amd64.zip"))["digest"] = "sha256:" + "0" * 64
                 with self.assertRaisesRegex(ValueError, "do not match"):
