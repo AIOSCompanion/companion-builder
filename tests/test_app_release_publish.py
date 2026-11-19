@@ -94,6 +94,23 @@ class AppDraftTests(unittest.TestCase):
         self.assertNotEqual(created["target_commitish"], self.SHA)
         self.assertFalse(created["generate_release_notes"])
 
+    def test_creation_waits_for_the_same_draft_to_appear_in_the_listing(self):
+        github = FakeGitHub(self.TARGET)
+        transient_reads = 0
+
+        def delayed(method, path, payload=None):
+            nonlocal transient_reads
+            if method == "GET" and "/releases?" in path and github.releases and transient_reads < 2:
+                transient_reads += 1
+                return []
+            return github(method, path, payload)
+
+        with patch("app_release_publish.time.sleep") as wait:
+            result = draft(self.TARGET, "v1.2.3", self.SHA, create=True, request=delayed)
+        self.assertEqual(result["id"], github.releases[0]["id"])
+        self.assertEqual(len(github.posts()), 1)
+        self.assertEqual([call.args for call in wait.call_args_list], [(1,), (2,)])
+
     def test_a_published_release_with_the_tag_is_never_modified_or_built_into(self):
         for tag in ("v1.2.3", "1.2.3"):
             github = FakeGitHub(self.TARGET, [self.release(draft=False, tag_name=tag)])

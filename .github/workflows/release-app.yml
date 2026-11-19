@@ -173,6 +173,12 @@ jobs:
           python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name build-app
           --log-dir "$RUNNER_TEMP/app-release-logs" --
           python -I -B "$RUNNER_TEMP/trusted/app_release.py" build --platform windows-amd64
+      - name: Set up the .NET SDK used by the pinned ARC Desktop source
+        uses: actions/setup-dotnet@v4
+        env:
+          DOTNET_INSTALL_DIR: ${{ runner.temp }}/companion-dotnet9
+        with:
+          dotnet-version: '9.0.321'
       - name: Build and stage the native Windows MCP resources
         run: >-
           python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name stage-mcp-resources
