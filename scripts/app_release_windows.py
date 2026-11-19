@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 import time
 
-from app_release_artifacts import filenames, version
+from app_release_artifacts import windows_binaries, version
 
 
 def command(args, *, env, timeout=30):
@@ -41,7 +41,7 @@ def window_for(pid):
 def check(root, tag, *, windows=None):
     if not (os.name == "nt" if windows is None else windows):
         raise ValueError("Windows package verification requires a Windows runner")
-    desktop_name, cli_name = filenames(tag, "windows-amd64")
+    desktop_name, cli_name = windows_binaries(tag)
     root = Path(root).resolve()
     cli, desktop = root / cli_name, root / desktop_name
     # A fresh home selects no owner profile, model key, database or fixed port. WebView2 keeps its data folder in

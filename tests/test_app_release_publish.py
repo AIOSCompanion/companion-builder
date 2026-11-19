@@ -8,7 +8,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import app_release_publish
 from app_release_publish import draft, marker, finalize, upload
-from app_release_artifacts import digest, filenames, prepare
+from app_release_artifacts import WINDOWS_RESOURCE_FILES, digest, filenames, prepare, windows_binaries
 
 
 class FakeGitHub:
@@ -168,11 +168,15 @@ class AppDraftTests(unittest.TestCase):
             for platform in ("windows-amd64", "darwin-arm64"):
                 root = Path(directory) / platform
                 root.mkdir()
-                names = filenames("v1.2.3", platform)
+                names = windows_binaries("v1.2.3") if platform == "windows-amd64" else filenames("v1.2.3", platform)
                 for name in names:
                     (root / name).write_bytes(b"synthetic " + name.encode())
                 if platform == "windows-amd64":
                     (root / "SHA256SUMS").write_text("".join(f"{digest(root / name)}  {name}\n" for name in names))
+                    for name in WINDOWS_RESOURCE_FILES:
+                        resource = root / name
+                        resource.parent.mkdir(parents=True, exist_ok=True)
+                        resource.write_bytes(b"synthetic resource")
                 prepare(root, root / "staged", "v1.2.3", self.SHA, platform)
                 for file in (root / "staged").iterdir():
                     id = len(assets) + 1
@@ -190,7 +194,7 @@ class AppDraftTests(unittest.TestCase):
                 self.assertEqual((method, path), ("PATCH", f"repos/{self.TARGET}/releases/77"))
                 self.assertIs(payload["draft"], True)
                 api.reset_mock()
-                next(asset for asset in assets if asset["name"].endswith(".exe"))["digest"] = "sha256:" + "0" * 64
+                next(asset for asset in assets if asset["name"].endswith("_windows_amd64.zip"))["digest"] = "sha256:" + "0" * 64
                 with self.assertRaisesRegex(ValueError, "do not match"):
                     finalize(self.TARGET, "v1.2.3", self.SHA)
                 api.assert_not_called()

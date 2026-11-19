@@ -73,7 +73,7 @@ def write_outputs(values):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("checkout", "toolchain", "preflight", "build", "check-windows", "check-macos",
+    parser.add_argument("command", choices=("checkout", "checkout-resources", "toolchain", "preflight", "build", "resources", "check-windows", "check-macos",
                                             "sign-macos", "unsigned-macos", "stage", "draft", "upload", "finalize"))
     parser.add_argument("--platform", choices=("windows-amd64", "darwin-arm64"))
     args = parser.parse_args()
@@ -87,9 +87,9 @@ def main():
         if unsigned not in ("true", "false"):
             raise ValueError("Invalid unsigned test selection")
         unsigned = unsigned == "true"
-        if args.command == "checkout":
+        if args.command in ("checkout", "checkout-resources"):
             from app_release_checkout import checkout
-            checkout(env)
+            checkout(env, resources=args.command == "checkout-resources")
         elif args.command == "toolchain":
             values = toolchain.resolve(Path(env["APP_SOURCE_DIR"]))
             write_outputs(values)
@@ -101,6 +101,12 @@ def main():
             if not args.platform:
                 raise ValueError("Platform required")
             build(env, args.platform)
+        elif args.command == "resources":
+            if not args.platform:
+                raise ValueError("Platform required")
+            source, _, _ = source_identity(env)
+            from app_release_resources import stage_resources
+            stage_resources(source, env, tag, args.platform)
         elif args.command == "check-windows":
             from app_release_windows import check
             check(Path(env["APP_SOURCE_DIR"]) / "dist", tag)

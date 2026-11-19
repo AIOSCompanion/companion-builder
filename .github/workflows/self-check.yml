@@ -120,3 +120,6 @@ jobs:
           python-version: '3.12'
       - name: Prove the packaged-window and macOS archive checks with known-good and negative controls
         run: python -I -B scripts/app_runner_calibration.py
+      - name: Verify the public macOS runtime archive and bundled Node signing
+        if: runner.os == 'macOS'
+        run: python -I -B scripts/app_release_resources.py

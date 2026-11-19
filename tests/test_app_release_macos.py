@@ -208,8 +208,10 @@ class MacPackageTests(unittest.TestCase):
         archive = self.root / "Companion_1.2.3-rc.1_darwin_arm64.zip"
         archive.write_bytes(b"synthetic zip")
         tools = FakeTools()
-        with patch("app_release_macos.attempt", side_effect=tools):
+        with patch("app_release_macos.attempt", side_effect=tools), \
+                patch("app_release_resources.check_macos_runtimes") as runtimes:
             verify_signed_archive(self.root, "v1.2.3-rc.1")
+        runtimes.assert_called_once()
         self.assertEqual(len(tools.named("codesign", "--verify")), 1)
         unsigned = FakeTools(signature="Signature=adhoc\n")
         with patch("app_release_macos.attempt", side_effect=unsigned), self.assertRaises(ValueError):

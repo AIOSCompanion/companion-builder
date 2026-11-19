@@ -133,6 +133,22 @@ jobs:
           python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name checkout-private-app
           --log-dir "$RUNNER_TEMP/app-release-logs" --
           python -I -B "$RUNNER_TEMP/trusted/app_release.py" checkout
+      - name: Create a read-only bundled resource checkout token
+        id: resource-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510
+        with:
+          app-id: ${{ vars.BUILDER_APP_ID }}
+          private-key: ${{ secrets.BUILDER_APP_PRIVATE_KEY }}
+          owner: AIOSCompanion
+          repositories: aios-desktop-app
+          permission-contents: read
+      - name: Check out the pinned bundled MCP source
+        env:
+          GH_TOKEN: ${{ steps.resource-token.outputs.token }}
+        run: >-
+          python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name checkout-resources
+          --log-dir "$RUNNER_TEMP/app-release-logs" --
+          python -I -B "$RUNNER_TEMP/trusted/app_release.py" checkout-resources
       # Go is pinned by the source's go.mod (toolchain line, else go line); Node comes from the UI's engines.
       - name: Read the Go and Node versions the pinned source asks for
         id: toolchain
@@ -157,6 +173,11 @@ jobs:
           python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name build-app
           --log-dir "$RUNNER_TEMP/app-release-logs" --
           python -I -B "$RUNNER_TEMP/trusted/app_release.py" build --platform windows-amd64
+      - name: Build and stage the native Windows MCP resources
+        run: >-
+          python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name stage-mcp-resources
+          --log-dir "$RUNNER_TEMP/app-release-logs" --
+          python -I -B "$RUNNER_TEMP/trusted/app_release.py" resources --platform windows-amd64
       - name: Verify the packaged Windows window and resident engine in a fresh home
         run: >-
           python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name verify-windows-app
@@ -239,6 +260,22 @@ jobs:
           python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name checkout-private-app
           --log-dir "$RUNNER_TEMP/app-release-logs" --
           python -I -B "$RUNNER_TEMP/trusted/app_release.py" checkout
+      - name: Create a read-only bundled resource checkout token
+        id: resource-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510
+        with:
+          app-id: ${{ vars.BUILDER_APP_ID }}
+          private-key: ${{ secrets.BUILDER_APP_PRIVATE_KEY }}
+          owner: AIOSCompanion
+          repositories: aios-desktop-app
+          permission-contents: read
+      - name: Check out the pinned bundled MCP source
+        env:
+          GH_TOKEN: ${{ steps.resource-token.outputs.token }}
+        run: >-
+          python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name checkout-resources
+          --log-dir "$RUNNER_TEMP/app-release-logs" --
+          python -I -B "$RUNNER_TEMP/trusted/app_release.py" checkout-resources
       # Go is pinned by the source's go.mod (toolchain line, else go line); Node comes from the UI's engines.
       - name: Read the Go and Node versions the pinned source asks for
         id: toolchain
@@ -263,6 +300,11 @@ jobs:
           python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name build-app
           --log-dir "$RUNNER_TEMP/app-release-logs" --
           python -I -B "$RUNNER_TEMP/trusted/app_release.py" build --platform darwin-arm64
+      - name: Build and stage the native macOS MCP resources
+        run: >-
+          python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name stage-mcp-resources
+          --log-dir "$RUNNER_TEMP/app-release-logs" --
+          python -I -B "$RUNNER_TEMP/trusted/app_release.py" resources --platform darwin-arm64
       # The built app runs here, in a step without signing material, and never in the signing step.
       - name: Check the macOS bundle version without credentials
         run: >-

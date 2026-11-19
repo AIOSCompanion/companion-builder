@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 import re
 import shutil
+import stat
+import zipfile
 
 TAG = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?")
 SHA = re.compile(r"[a-f0-9]{40}")
@@ -15,10 +17,37 @@ def version(tag):
     return tag[1:]
 
 
+WINDOWS_RESOURCE_FILES = {
+    "resources/external_runtimes/node-win-x64/node.exe",
+    "resources/external_runtimes/node-win-x64/LICENSE",
+    "resources/external_runtimes/python-win-x64/python.exe",
+    "resources/agent_browser_guard/agent-browser-guard.mjs",
+    "resources/arc_desktop/arc-desktop.exe",
+    "resources/android_mcp_deps/python-deps/adbutils/binaries/adb.exe",
+    "resources/default-mcps/companion-google/server.mjs",
+    "resources/default-mcps/companion-m365/server.mjs",
+    *(f"resources/default-mcps/{name}/mcp.json" for name in
+      ("companion-google", "companion-m365", "android-commander", "agent-browser-guard", "arc-desktop")),
+}
+WINDOWS_RESOURCE_TREES = {
+    "resources/external_runtimes/python-win-x64/",
+    "resources/android_mcp_deps/",
+    "resources/agent_browser_guard/",
+    "resources/arc_desktop/",
+    *(f"resources/default-mcps/{name}/" for name in
+      ("companion-google", "companion-m365", "android-commander", "agent-browser-guard", "arc-desktop")),
+}
+
+
+def windows_binaries(tag):
+    value = version(tag)
+    return [f"Companion_{value}_windows_amd64.exe", f"companion-cli_{value}_windows_amd64.exe"]
+
+
 def filenames(tag, platform, unsigned=False):
     value = version(tag)
     if platform == "windows-amd64":
-        return [f"Companion_{value}_windows_amd64.exe", f"companion-cli_{value}_windows_amd64.exe"]
+        return [f"Companion_{value}_windows_amd64.zip"]
     if platform == "darwin-arm64":
         suffix = "_unsigned-test" if unsigned else ""
         return [f"Companion_{value}_darwin_arm64{suffix}.zip"]
@@ -38,7 +67,7 @@ def regular_file(root, name):
 
 
 def verify_windows_outputs(root, tag):
-    names = filenames(tag, "windows-amd64")
+    names = windows_binaries(tag)
     values = {name: digest(regular_file(root, name)) for name in names}
     manifest = regular_file(root, "SHA256SUMS").read_text(encoding="utf-8-sig")
     listed = {}
@@ -52,6 +81,42 @@ def verify_windows_outputs(root, tag):
     return names
 
 
+def package_windows(root, tag):
+    root = Path(root)
+    binaries = verify_windows_outputs(root, tag)
+    resources = root / "resources"
+    if not resources.is_dir() or resources.is_symlink() or resources.is_junction():
+        raise ValueError("Windows native resources are missing")
+    members = dict((name, root / name) for name in binaries)
+    for path in sorted(resources.rglob("*")):
+        info = path.lstat()
+        if path.is_symlink() or path.is_junction() or not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)):
+            raise ValueError("Windows release resources contain a link or special file")
+        if path.is_dir():
+            continue
+        name = path.relative_to(root).as_posix()
+        if name not in WINDOWS_RESOURCE_FILES and not any(name.startswith(prefix) for prefix in WINDOWS_RESOURCE_TREES):
+            raise ValueError("Windows archive contains an unexpected resource")
+        if any(part.startswith((".env", ".git")) and part not in (".github", ".gitignore") for part in path.relative_to(root).parts):
+            raise ValueError("Windows release resources contain a local configuration or repository")
+        members[name] = path
+    if not WINDOWS_RESOURCE_FILES.issubset(members) or any(members[name].stat().st_size == 0 for name in WINDOWS_RESOURCE_FILES):
+        raise ValueError("Windows release is missing a required Companion MCP resource")
+    if len({name.casefold() for name in members}) != len(members):
+        raise ValueError("Windows release paths collide")
+    archive = root / filenames(tag, "windows-amd64")[0]
+    try:
+        with zipfile.ZipFile(archive, "x", zipfile.ZIP_DEFLATED, compresslevel=5) as output:
+            for name, path in members.items():
+                output.write(path, name)
+    except FileExistsError:
+        raise ValueError("The Windows release archive already exists") from None
+    except Exception:
+        archive.unlink(missing_ok=True)
+        raise
+    return archive
+
+
 def prepare(root, output, tag, source_sha, platform, unsigned=False):
     if not SHA.fullmatch(source_sha or ""):
         raise ValueError("Invalid immutable source commit")
@@ -59,7 +124,9 @@ def prepare(root, output, tag, source_sha, platform, unsigned=False):
     if output.exists():
         raise ValueError("Release staging directory already exists")
     output.mkdir(parents=True, mode=0o700)
-    names = verify_windows_outputs(root, tag) if platform == "windows-amd64" else filenames(tag, platform, unsigned)
+    if platform == "windows-amd64":
+        package_windows(root, tag)
+    names = filenames(tag, platform, unsigned)
     hashes = {}
     for name in names:
         source = regular_file(root, name)
