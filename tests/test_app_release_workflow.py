@@ -35,7 +35,8 @@ class AppWorkflowTests(unittest.TestCase):
                     self.assertEqual(step["name"], "Sign notarize and staple the macOS arm64 bundle")
                     self.assertIn("!inputs.allow_unsigned_macos_test", step["if"])
                 if "BUILDER_APP_PRIVATE_KEY" in str(step):
-                    self.assertEqual(step["with"]["repositories"], "companion-engine")
+                    expected_repo = "aios-desktop-app" if step.get("id") == "resource-token" else "companion-engine"
+                    self.assertEqual(step["with"]["repositories"], expected_repo)
                     self.assertEqual(step["with"]["permission-contents"], "read")
 
     def test_the_windows_job_never_references_the_apple_signing_secrets(self):
@@ -69,6 +70,12 @@ class AppWorkflowTests(unittest.TestCase):
             self.assertIn("run_sealed.py", private["run"])
             self.assertIn("app_release.py", private["run"])
             self.assertTrue(private["run"].endswith("checkout"))
+            resources = next(step for step in steps if step.get("name") == "Check out the pinned bundled MCP source")
+            self.assertTrue(resources["run"].endswith("checkout-resources"))
+            self.assertEqual(resources["env"], {"GH_TOKEN": "${{ steps.resource-token.outputs.token }}"})
+            stage = next(step for step in steps if step.get("name", "").startswith("Build and stage the native"))
+            self.assertNotIn("env", stage)
+            self.assertLess(steps.index(resources), steps.index(stage))
             env = WORKFLOW["jobs"][job]["env"]
             self.assertEqual(env["SOURCE_SHA"], "${{ needs.identity.outputs.commit_sha }}")
             self.assertEqual(env["TAG_OBJECT_SHA"], "${{ needs.identity.outputs.tag_object_sha }}")
@@ -116,7 +123,8 @@ class AppWorkflowTests(unittest.TestCase):
         identity = WORKFLOW["jobs"]["identity"]["steps"]
         reader = next(step for step in identity if step.get("id") == "identity")
         self.assertEqual(reader["env"]["APP_RELEASE_REPOSITORY"], "${{ vars.APP_RELEASE_REPOSITORY }}")
-        for name in ("aios-companion-releases", "aios-desktop-app", "aiosxaegra", "companion-memory"):
+        self.assertEqual(text.count("repositories: aios-desktop-app"), 2)
+        for name in ("aios-companion-releases", "aiosxaegra", "companion-memory"):
             self.assertNotIn(name, text)
 
     def test_dispatch_inputs_never_become_shell_text(self):

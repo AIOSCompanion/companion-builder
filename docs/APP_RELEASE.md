@@ -85,6 +85,13 @@ window, authenticated engine access in a fresh isolated home, engine residency
 after window close, and stopping only that home through `down --home`. The tag
 must therefore contain the engine's `down` command.
 
+Both native rows check out the pin in `scripts/app_release_checkout.py` through
+the existing read-only GitHub App and use the matching hashed runtime asset.
+They stage the guarded browser, Google Workspace, Microsoft 365 and Android
+Commander and their runtimes before packaging. The Windows row also stages
+ARC Desktop. The portable Windows ZIP contains both executables alongside their
+`resources` folder. Extract the entire ZIP before running Companion.
+
 A credential-free step first checks the macOS bundle's structure and runs its
 executable's `version`. The signing step then checks the structure again without
 running anything from the bundle, and signs a copy of the
@@ -102,8 +109,8 @@ unsigned bypass is the explicit dispatch input: it creates a separately named
 `_unsigned-test.zip`, marks the receipt unsigned and creates a clearly labelled
 prerelease draft. It never claims a signed result or reads Apple credentials.
 
-Only the two Windows executables, one macOS ZIP, platform-qualified checksum
-files and platform receipts can reach the draft: seven assets total. Receipts
+Only the Windows and macOS ZIPs, platform-qualified checksum
+files and platform receipts can reach the draft. Receipts
 bind the source commit, tag, platform, signing mode and every downloadable hash;
 once published they are public, like the checksums. Existing assets with
 different bytes are refused without overwrite. Finalization requires both

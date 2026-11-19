@@ -242,8 +242,12 @@ def sign_notarize_staple(app, folder, env, sleep=time.sleep):
         run(["security", "list-keychains", "-d", "user", "-s", str(keychain), *original], env=child)
         identity = find_identity(keychain, child)
         sign = ["codesign", "--force", "--options", "runtime", "--timestamp", "--keychain", str(keychain), "--sign", identity]
+        node = app / "Contents/Resources/external_runtimes/node-mac-arm64/bin/node"
+        node_entitlements = folder / "node-entitlements.plist"
+        write_private(node_entitlements, plistlib.dumps({"com.apple.security.cs.allow-jit": True}))
         for path in [*nested_code(app), app]:
-            run(sign + [str(path)], timeout=600, env=child)
+            entitlements = ["--entitlements", str(node_entitlements)] if path == node else []
+            run(sign + entitlements + [str(path)], timeout=600, env=child)
         run(["codesign", "--verify", "--deep", "--strict", "--verbose=2", str(app)], env=child)
         submission = folder / "submission.zip"
         zip_app(app, submission, env=child)
@@ -321,4 +325,6 @@ def verify_signed_archive(root, tag):
         app = Path(temporary) / APP_NAME
         check_bundle(app, tag)
         verify_signature(app)
+        from app_release_resources import check_macos_runtimes
+        check_macos_runtimes(app / "Contents/Resources")
     print(f"{archive.name} verified: Developer ID signed, notarised and stapled")
