@@ -181,5 +181,10 @@ def finalize(repository, tag, source_sha, unsigned=False):
     body = (checked_release.get("body") or "").split("\n\n<!-- companion-app-verified", 1)[0]
     body += "\n\n<!-- companion-app-verified: windows-package-checks; " + (
         "unsigned-macos-test" if unsigned else "signed-notarized-stapled-macos") + " -->"
-    api("PATCH", f"repos/{repository}/releases/{checked_release['id']}", {"body": body, "draft": True})
+    updated = api("PATCH", f"repos/{repository}/releases/{checked_release['id']}", {
+        "body": body, "draft": True, "tag_name": tag, "prerelease": unsigned or "-" in version(tag),
+    })
+    if (not isinstance(updated, dict) or updated.get("id") != checked_release["id"]
+            or updated.get("draft") is not True or updated.get("tag_name") != tag):
+        raise ValueError("GitHub did not retain the identity of the finalized draft")
     print("Both platform receipts and draft assets verified; release remains unpublished")
