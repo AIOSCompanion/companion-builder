@@ -1,5 +1,6 @@
 """Build the legacy Companion MCP resources on the same native runner as Go."""
 import hashlib
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 import plistlib
 import shutil
@@ -19,6 +20,20 @@ RUNTIME_URL = "https://github.com/AIOSCompanion/aios-companion-releases/releases
 WINDOWS_NODE = "node-v22.23.3-win-x64"
 WINDOWS_NODE_SHA = "2b0ff57b049cda1bbcea2240eec20467018713c1efe1f7360c2681859b90ed71"
 WINDOWS_NODE_EXE_SHA = "9c9245166b4a8e182e0b797da9c20136117ff24368eaff1fec8343a123c8db0e"
+
+
+class ResourceStageError(RuntimeError):
+    def __init__(self, status, name):
+        super().__init__(f"Native resource stage failed: {name}")
+        self.status = status
+
+
+@contextmanager
+def resource_stage(status, name):
+    try:
+        yield
+    except Exception as error:
+        raise ResourceStageError(status, name) from error
 PLATFORM_INPUTS = {
     "windows-amd64": (
         "external_runtimes_win.tar.gz",
@@ -105,15 +120,28 @@ def stage_resources(source, env, tag, platform):
     child.pop("NoDefaultCurrentDirectoryInExePath", None)
     runtimes = legacy / "external_runtimes"
     windows = platform == "windows-amd64"
-    extract_runtimes(legacy, platform)
+    with resource_stage(22, "runtime archives"):
+        extract_runtimes(legacy, platform)
     npm = "npm.cmd" if windows else "npm"
-    checked([npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund"], cwd=legacy / "connectors", env=child)
-    checked(["node", "connectors/build.mjs", "--stage"], cwd=legacy, env=child)
-    checked(["node", "scripts/stage-agent-browser-guard.mjs"], cwd=legacy, env=child)
+    with resource_stage(23, "connector dependencies and bundles"):
+        checked([npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund"], cwd=legacy / "connectors", env=child)
+        checked(["node", "connectors/build.mjs", "--stage"], cwd=legacy, env=child)
+    with resource_stage(24, "browser resources"):
+        checked(["node", "scripts/stage-agent-browser-guard.mjs"], cwd=legacy, env=child)
     if windows:
-        checked(["node", "scripts/stage-arc-desktop.mjs", "--test"], cwd=legacy, env=child)
+        with resource_stage(25, "ARC Desktop"):
+            checked(["node", "scripts/stage-arc-desktop.mjs", "--test"], cwd=legacy, env=child)
     row = dict(child, ROW_OS="Windows" if windows else "macOS", ROW_ARCH="x64" if windows else "arm64")
-    checked(["bash", "scripts/release/row_android.sh"], cwd=legacy, env=row)
+    with resource_stage(26, "Android MCP dependencies"):
+        bash = "bash"
+        if windows:
+            git = shutil.which("git.exe", path=child.get("PATH"))
+            if not git:
+                raise ValueError("Git for Windows is required for the Android staging script")
+            bash = str(Path(git).resolve().parent.parent / "bin" / "bash.exe")
+            if not Path(bash).is_file():
+                raise ValueError("The Git for Windows Bash executable was not found")
+        checked([bash, "scripts/release/row_android.sh"], cwd=legacy, env=row)
 
     dist = source / "dist"
     if windows:
@@ -122,12 +150,13 @@ def stage_resources(source, env, tag, platform):
         destination = dist / f"Companion_{version(tag)}_darwin_arm64.app/Contents/Resources"
         if not destination.is_dir() or not (destination / "AppIcon.icns").is_file():
             raise ValueError("App bundle is missing before resource staging")
-    checked(["node", str(source / "scripts/stage-desktop-mcps.mjs"), str(legacy), str(runtimes), str(destination)],
-            cwd=source, env=child)
-    if windows:
-        checked([str(destination / "external_runtimes/node-win-x64/node.exe"), "--version"], cwd=destination, env=child)
-    else:
-        check_macos_runtimes(destination, child)
+    with resource_stage(27, "assembled package"):
+        checked(["node", str(source / "scripts/stage-desktop-mcps.mjs"), str(legacy), str(runtimes), str(destination)],
+                cwd=source, env=child)
+        if windows:
+            checked([str(destination / "external_runtimes/node-win-x64/node.exe"), "--version"], cwd=destination, env=child)
+        else:
+            check_macos_runtimes(destination, child)
     print("Staged and verified native Companion MCP resources")
 
 

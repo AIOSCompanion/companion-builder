@@ -105,8 +105,12 @@ def main():
             if not args.platform:
                 raise ValueError("Platform required")
             source, _, _ = source_identity(env)
-            from app_release_resources import stage_resources
-            stage_resources(source, env, tag, args.platform)
+            from app_release_resources import ResourceStageError, stage_resources
+            try:
+                stage_resources(source, env, tag, args.platform)
+            except ResourceStageError as error:
+                traceback.print_exc()
+                return error.status
         elif args.command == "check-windows":
             from app_release_windows import check
             check(Path(env["APP_SOURCE_DIR"]) / "dist", tag)
