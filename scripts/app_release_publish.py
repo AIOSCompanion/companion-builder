@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+import time
 from urllib.parse import quote
 
 from app_release_identity import validate_destination
@@ -78,12 +79,22 @@ def draft(repository, tag, source_sha, unsigned=False, *, create=False, request=
         if commit.get("type") != "commit":
             raise ValueError("Public release destination has no initial commit")
         body = "Companion Go/Wails app.\n\n" + ("**UNSIGNED macOS TEST BUILD.**\n\n" if unsigned else "") + expected
-        request("POST", f"repos/{repository}/releases", {"tag_name": tag,
+        created = request("POST", f"repos/{repository}/releases", {"tag_name": tag,
             "target_commitish": commit["sha"], "name": f"Companion {version(tag)}" + (" - UNSIGNED macOS TEST" if unsigned else ""),
             "draft": True, "prerelease": unsigned or "-" in version(tag), "body": body,
             "generate_release_notes": False})
-        # A concurrent creator would leave two drafts and split the uploads.
-        found = single_draft(releases_for(repository, tag, request))
+        if not isinstance(created, dict) or type(created.get("id")) is not int:
+            raise ValueError("GitHub did not return the new draft identity")
+        # GitHub can acknowledge creation before the draft appears in the list.
+        # Re-read with a bound and still refuse a competing or published release.
+        for delay in (0, 1, 2, 4, 8):
+            if delay:
+                time.sleep(delay)
+            found = single_draft(releases_for(repository, tag, request))
+            if found is not None:
+                if found.get("id") != created["id"]:
+                    raise ValueError("A different draft appeared after creation")
+                break
         if found is None:
             raise ValueError("The created draft is not listed")
     if not isinstance(found.get("id"), int):
