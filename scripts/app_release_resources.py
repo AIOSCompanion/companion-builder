@@ -69,6 +69,10 @@ def runtime_filter(allowed):
             return None
         if any(part.startswith("._") for part in parts):
             return None
+        if parts[1] == "node-mac-arm64" and parts[2:] not in (
+            (), ("bin",), ("bin", "node"), ("LICENSE",),
+        ):
+            return None
         if member.islnk() or (member.issym() and len(PurePosixPath(member.linkname).parts) != 1):
             raise ValueError("Runtime archive contains a link outside its own directory")
         return tarfile.data_filter(member, destination)
