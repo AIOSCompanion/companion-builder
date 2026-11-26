@@ -132,7 +132,12 @@ def main():
                 # unless the app in it is Developer ID signed, notarised and stapled.
                 from app_release_macos import verify_signed_archive
                 verify_signed_archive(dist, tag)
-            prepare(dist, env["APP_ASSET_DIR"], tag, sha, args.platform, unsigned)
+            previous = None
+            if args.platform == "windows-amd64":
+                # A generation this archive misses copies the newest published release's receipt of that generation.
+                from app_release_publish import previous_receipt
+                previous = lambda name: previous_receipt(env.get("APP_RELEASE_REPOSITORY", ""), name, args.platform, tag)
+            prepare(dist, env["APP_ASSET_DIR"], tag, sha, args.platform, unsigned, previous)
         elif args.command == "draft":
             from app_release_publish import draft
             draft(env["APP_RELEASE_REPOSITORY"], tag, sha, unsigned, create=True)

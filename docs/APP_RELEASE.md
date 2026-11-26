@@ -118,6 +118,17 @@ complete platform sets and GitHub's matching SHA256 asset digests. All releases
 remain **unpublished drafts** for owner review/publication. Resuming a draft with
 a different source or signing mode is refused.
 
+**Windows receipt generations.** The Windows row publishes two receipts, one per
+updater allow-list: `companion-release-windows-amd64.json` (generation 1, read by the
+0.19.1 to 0.19.3 updaters) and `companion-release-g2-windows-amd64.json` (generation 2).
+A generation's receipt names this release when the archive extracts under that
+generation's frozen list (`GENERATIONS` in `scripts/app_release_artifacts.py`). When it
+does not, the receipt is the newest published release's receipt of that generation,
+copied byte for byte, and staging refuses unless that release is still published and
+still lists its archive and checksum with the same hashes. Nothing is set by hand, and
+no pointer is fabricated. Order matters for admitted-only files: see companion-engine
+`docs/release-order.md`.
+
 **Recovering a failed run.** Signed macOS output is never byte-identical between
 builds (its secure timestamp and notarisation ticket differ), and a rebuilt
 Windows executable may differ too. So after a partial failure:
