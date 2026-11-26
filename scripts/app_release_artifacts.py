@@ -28,6 +28,9 @@ WINDOWS_RESOURCE_FILES = {
     "resources/default-mcps/companion-m365/server.mjs",
     *(f"resources/default-mcps/{name}/mcp.json" for name in
       ("companion-google", "companion-m365", "android-commander", "agent-browser-guard", "arc-desktop")),
+    # The ARC child (the old Companion Browser): the engine runs it only from these two files (profiledARC).
+    "resources/default-mcps/companion-arc/mcp.json",
+    "resources/companion_arc/companion-arc.cjs",
 }
 WINDOWS_RESOURCE_TREES = {
     "resources/external_runtimes/python-win-x64/",

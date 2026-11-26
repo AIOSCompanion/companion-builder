@@ -60,6 +60,21 @@ class AppArtifactsTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "missing a required"):
                 prepare(root, root / "second-assets", "v1.2.3", "a" * 40, "windows-amd64")
 
+    def test_companion_arc_child_is_a_required_windows_resource_named_like_the_staging_check(self):
+        # Incident (2026-11-26): the released Windows package carried neither companion-arc.cjs nor its manifest, so
+        # every installed copy started without the ARC browser. Both files are required, and the list the staging step
+        # checks (app_release_resources.COMPANION_ARC_FILES) names exactly the same files.
+        from app_release_resources import COMPANION_ARC_FILES
+        arc = {f"resources/{name}" for name in COMPANION_ARC_FILES}
+        self.assertEqual(arc, {"resources/companion_arc/companion-arc.cjs", "resources/default-mcps/companion-arc/mcp.json"})
+        self.assertTrue(arc <= WINDOWS_RESOURCE_FILES)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.windows(root)
+            (root / "resources/companion_arc/companion-arc.cjs").unlink()
+            with self.assertRaisesRegex(ValueError, "missing a required"):
+                prepare(root, root / "assets", "v1.2.3", "a" * 40, "windows-amd64")
+
     def test_tampering_after_staging_is_rejected_before_upload(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
