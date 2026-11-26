@@ -1,13 +1,14 @@
 import hashlib
 import json
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from app_release_artifacts import WINDOWS_RESOURCE_FILES, digest, filenames, inspect, prepare, verify_windows_outputs, windows_binaries
+from app_release_artifacts import WINDOWS_RESOURCE_FILES, digest, filenames, inspect, is_reparse_point, prepare, verify_windows_outputs, windows_binaries
 
 
 class AppArtifactsTests(unittest.TestCase):
@@ -73,6 +74,29 @@ class AppArtifactsTests(unittest.TestCase):
             self.windows(root)
             (root / "resources/companion_arc/companion-arc.cjs").unlink()
             with self.assertRaisesRegex(ValueError, "missing a required"):
+                prepare(root, root / "assets", "v1.2.3", "a" * 40, "windows-amd64")
+
+    def test_plain_files_and_missing_paths_are_not_reparse_points(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "file.txt").write_text("plain")
+            (root / "folder").mkdir()
+            self.assertFalse(is_reparse_point(root / "file.txt"))
+            self.assertFalse(is_reparse_point(root / "folder"))
+            self.assertFalse(is_reparse_point(root / "missing"))
+
+    @unittest.skipUnless(sys.platform == "win32", "a Windows junction")
+    def test_a_junction_in_the_resources_is_refused_on_every_python(self):
+        # Incident (2026-11-26): Path.is_junction exists only on Python 3.12+, so the Python 3.11 run failed with AttributeError
+        # before the link check ran. The check reads the reparse attribute, which every Windows Python reports.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.windows(root)
+            target = root / "outside"
+            target.mkdir()
+            subprocess.run(["cmd", "/c", "mklink", "/J", str(root / "resources/linked"), str(target)], check=True, capture_output=True)
+            self.assertTrue(is_reparse_point(root / "resources/linked"))
+            with self.assertRaisesRegex(ValueError, "link or special file"):
                 prepare(root, root / "assets", "v1.2.3", "a" * 40, "windows-amd64")
 
     def test_tampering_after_staging_is_rejected_before_upload(self):

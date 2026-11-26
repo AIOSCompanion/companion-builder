@@ -1,6 +1,7 @@
 """Strict allowlists and content receipts for the new app's downloadable assets."""
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -15,6 +16,19 @@ def version(tag):
     if not TAG.fullmatch(tag or ""):
         raise ValueError("Invalid new-app version tag")
     return tag[1:]
+
+
+def is_reparse_point(path):
+    """True for a Windows junction, a symlink or any other reparse point; False elsewhere and for a missing path.
+
+    Path.is_junction exists only on Python 3.12+, so the release checks read the reparse attribute, which every Windows Python
+    reports. It is broader than is_junction (a symlink counts too), and every caller refuses links anyway, so it only refuses more.
+    """
+    try:
+        attributes = getattr(os.lstat(path), "st_file_attributes", 0)
+    except (OSError, ValueError):
+        return False
+    return bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
 
 
 WINDOWS_RESOURCE_FILES = {
@@ -88,12 +102,12 @@ def package_windows(root, tag):
     root = Path(root)
     binaries = verify_windows_outputs(root, tag)
     resources = root / "resources"
-    if not resources.is_dir() or resources.is_symlink() or resources.is_junction():
+    if not resources.is_dir() or resources.is_symlink() or is_reparse_point(resources):
         raise ValueError("Windows native resources are missing")
     members = dict((name, root / name) for name in binaries)
     for path in sorted(resources.rglob("*")):
         info = path.lstat()
-        if path.is_symlink() or path.is_junction() or not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)):
+        if path.is_symlink() or is_reparse_point(path) or not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)):
             raise ValueError("Windows release resources contain a link or special file")
         if path.is_dir():
             continue

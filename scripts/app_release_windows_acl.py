@@ -8,6 +8,8 @@ import ctypes
 from ctypes import wintypes
 from pathlib import Path
 
+from app_release_artifacts import is_reparse_point
+
 
 class Luid(ctypes.Structure):
     _fields_ = [("low", wintypes.DWORD), ("high", wintypes.LONG)]
@@ -95,7 +97,7 @@ def owner_sid(path):
 
 def set_owners(destination, sid):
     paths = [Path(destination), *Path(destination).rglob("*")]
-    if any(path.is_symlink() or path.is_junction() for path in paths):
+    if any(path.is_symlink() or is_reparse_point(path) for path in paths):
         raise RuntimeError("Ownership changes cannot follow snapshot links")
     pending = [path for path in paths if owner_sid(path) != sid]
     if not pending:
@@ -120,7 +122,7 @@ def set_permissions(destination, sid, *, readonly):
     security, kernel = native()
     paths = sorted(Path(destination).rglob("*"), key=lambda path: len(path.parts), reverse=True)
     for path in [*paths, Path(destination)]:
-        if path.is_symlink() or path.is_junction():
+        if path.is_symlink() or is_reparse_point(path):
             raise RuntimeError("Snapshot permissions cannot follow links")
         inherit = "OICI" if path.is_dir() else ""
         rights = "FRFX" if readonly else "FA"
