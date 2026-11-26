@@ -127,6 +127,15 @@ class AppWorkflowTests(unittest.TestCase):
         for name in ("aios-companion-releases", "aiosxaegra", "companion-memory"):
             self.assertNotIn(name, text)
 
+    def test_the_windows_stage_step_names_the_destination_and_holds_no_publisher_credential(self):
+        # Staging copies the newest published receipt of a generation the archive misses. It reads a public repository,
+        # so it needs the destination's name and no credential; the build job must never hold the publisher token.
+        steps = WORKFLOW["jobs"]["build-windows"]["steps"]
+        stage = next(step for step in steps if "stage --platform windows-amd64" in step.get("run", ""))
+        self.assertEqual(stage["env"]["APP_RELEASE_REPOSITORY"], "${{ needs.identity.outputs.release_repository }}")
+        self.assertNotIn("PUBLISH_RELEASES_TOKEN", str(stage))
+        self.assertNotIn("GH_TOKEN", stage["env"])
+
     def test_dispatch_inputs_never_become_shell_text(self):
         for job in WORKFLOW["jobs"].values():
             for step in job["steps"]:

@@ -192,6 +192,8 @@ jobs:
       - name: Bind only the expected downloadable assets to this source commit
         env:
           APP_ASSET_DIR: ${{ runner.temp }}/app-release-assets
+          # Read-only and public: names the destination so staging can copy the newest published pointer. No credential.
+          APP_RELEASE_REPOSITORY: ${{ needs.identity.outputs.release_repository }}
         run: >-
           python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name stage-app-assets
           --log-dir "$RUNNER_TEMP/app-release-logs" --

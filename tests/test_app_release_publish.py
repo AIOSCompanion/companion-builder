@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import app_release_publish
 from app_release_publish import draft, marker, finalize, upload
 from app_release_artifacts import WINDOWS_RESOURCE_FILES, digest, filenames, prepare, windows_binaries
+from test_app_release_artifacts import OLDER_TAG, older_generation_one, older_listing
 
 
 class FakeGitHub:
@@ -194,7 +195,7 @@ class AppDraftTests(unittest.TestCase):
                         resource = root / name
                         resource.parent.mkdir(parents=True, exist_ok=True)
                         resource.write_bytes(b"synthetic resource")
-                prepare(root, root / "staged", "v1.2.3", self.SHA, platform)
+                prepare(root, root / "staged", "v1.2.3", self.SHA, platform, previous=older_generation_one)
                 for file in (root / "staged").iterdir():
                     id = len(assets) + 1
                     assets.append(dict(id=id, name=file.name, size=file.stat().st_size, digest="sha256:" + digest(file)))
@@ -202,24 +203,34 @@ class AppDraftTests(unittest.TestCase):
             release = dict(id=77, assets=assets, body=marker("v1.2.3", self.SHA, False))
             def download(args, **kwargs):
                 return SimpleNamespace(returncode=0, stdout=downloads[args[-1].rsplit("/", 1)[-1]])
+            published = {"id": 77, "draft": True, "tag_name": "v1.2.3"}
+
+            def github_api(method, path, payload=None):
+                # The Windows generation-1 receipt is a copy of the older release's, which GitHub must still list; the rest is the PATCH.
+                if method == "GET" and path == f"repos/{self.TARGET}/releases/tags/{OLDER_TAG}":
+                    return older_listing()
+                if method == "PATCH":
+                    return published
+                raise AssertionError((method, path))
+
             with patch("app_release_publish.draft", return_value=release), \
                     patch("app_release_publish.subprocess.run", side_effect=download), \
-                    patch("app_release_publish.api") as api:
-                api.return_value = {"id": 77, "draft": True, "tag_name": "v1.2.3"}
+                    patch("app_release_publish.api", side_effect=github_api) as api:
                 finalize(self.TARGET, "v1.2.3", self.SHA)
-                self.assertEqual(api.call_count, 1)
-                method, path, payload = api.call_args.args
+                patches = [call.args for call in api.call_args_list if call.args[0] == "PATCH"]
+                self.assertEqual(len(patches), 1)
+                method, path, payload = patches[0]
                 self.assertEqual((method, path), ("PATCH", f"repos/{self.TARGET}/releases/77"))
                 self.assertIs(payload["draft"], True)
                 self.assertEqual(payload["tag_name"], "v1.2.3")
-                api.return_value["tag_name"] = "untagged-fixture"
+                published["tag_name"] = "untagged-fixture"
                 with self.assertRaisesRegex(ValueError, "retain the identity"):
                     finalize(self.TARGET, "v1.2.3", self.SHA)
                 api.reset_mock()
                 next(asset for asset in assets if asset["name"].endswith("_windows_amd64.zip"))["digest"] = "sha256:" + "0" * 64
                 with self.assertRaisesRegex(ValueError, "do not match"):
                     finalize(self.TARGET, "v1.2.3", self.SHA)
-                api.assert_not_called()
+                self.assertFalse(any(call.args[0] == "PATCH" for call in api.call_args_list))
 
 
 if __name__ == "__main__":

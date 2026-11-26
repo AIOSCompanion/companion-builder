@@ -10,6 +10,25 @@ import zipfile
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from app_release_artifacts import WINDOWS_RESOURCE_FILES, digest, filenames, inspect, is_reparse_point, prepare, verify_windows_outputs, windows_binaries
 
+# A Windows archive carries the ARC pair, so it needs a generation-1 copy from the newest published release. OLDER_TAG is that release
+# here: its receipt is a valid pointer (prepare() checks that), and older_listing is GitHub's record of it (finalize checks that).
+OLDER_TAG = "v1.2.2"
+OLDER_ASSETS = {filenames(OLDER_TAG, "windows-amd64")[0]: "b" * 64, "SHA256SUMS-windows-amd64.txt": "c" * 64}
+
+
+def older_generation_one(name):
+    if name != "companion-release-windows-amd64.json":
+        return None
+    receipt = {"schema": 1, "source_sha": "d" * 40, "tag": OLDER_TAG, "version": OLDER_TAG[1:], "platform": "windows-amd64",
+               "signing": "unsigned-windows", "assets": OLDER_ASSETS}
+    return (json.dumps(receipt, sort_keys=True, indent=2) + "\n").encode("utf-8")
+
+
+def older_listing():
+    """GitHub's listing of the older release: its archive and checksum, with the hashes its receipt names."""
+    return {"tag_name": OLDER_TAG, "draft": False, "assets": [
+        {"name": name, "digest": "sha256:" + value} for name, value in OLDER_ASSETS.items()]}
+
 
 class AppArtifactsTests(unittest.TestCase):
     def test_windows_gui_and_cli_are_distinct_even_on_case_insensitive_filesystems(self):
@@ -40,11 +59,11 @@ class AppArtifactsTests(unittest.TestCase):
             names = self.windows(root)
             (root / "private-source.py").write_text("must never publish")
             output = root / "assets"
-            prepare(root, output, "v1.2.3", "a" * 40, "windows-amd64")
+            prepare(root, output, "v1.2.3", "a" * 40, "windows-amd64", previous=older_generation_one)
             receipt, files = inspect(output, "v1.2.3", "a" * 40, "windows-amd64")
             archive, = filenames("v1.2.3", "windows-amd64")
-            self.assertEqual({p.name for p in files}, {archive,
-                "SHA256SUMS-windows-amd64.txt", "companion-release-windows-amd64.json"})
+            self.assertEqual({p.name for p in files}, {archive, "SHA256SUMS-windows-amd64.txt",
+                "companion-release-windows-amd64.json", "companion-release-g2-windows-amd64.json"})
             self.assertEqual(receipt["signing"], "unsigned-windows")
             with zipfile.ZipFile(output / archive) as bundle:
                 self.assertEqual(set(bundle.namelist()), set(names) | WINDOWS_RESOURCE_FILES)
@@ -55,11 +74,11 @@ class AppArtifactsTests(unittest.TestCase):
             self.windows(root)
             (root / "resources/private-source.py").write_text("must never publish")
             with self.assertRaisesRegex(ValueError, "unexpected resource"):
-                prepare(root, root / "assets", "v1.2.3", "a" * 40, "windows-amd64")
+                prepare(root, root / "assets", "v1.2.3", "a" * 40, "windows-amd64", previous=older_generation_one)
             (root / "resources/private-source.py").unlink()
             (root / next(iter(WINDOWS_RESOURCE_FILES))).unlink()
             with self.assertRaisesRegex(ValueError, "missing a required"):
-                prepare(root, root / "second-assets", "v1.2.3", "a" * 40, "windows-amd64")
+                prepare(root, root / "second-assets", "v1.2.3", "a" * 40, "windows-amd64", previous=older_generation_one)
 
     def test_companion_arc_child_is_a_required_windows_resource_named_like_the_staging_check(self):
         # Incident (2026-11-26): the released Windows package carried neither companion-arc.cjs nor its manifest, so
@@ -74,7 +93,7 @@ class AppArtifactsTests(unittest.TestCase):
             self.windows(root)
             (root / "resources/companion_arc/companion-arc.cjs").unlink()
             with self.assertRaisesRegex(ValueError, "missing a required"):
-                prepare(root, root / "assets", "v1.2.3", "a" * 40, "windows-amd64")
+                prepare(root, root / "assets", "v1.2.3", "a" * 40, "windows-amd64", previous=older_generation_one)
 
     def test_plain_files_and_missing_paths_are_not_reparse_points(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -97,14 +116,14 @@ class AppArtifactsTests(unittest.TestCase):
             subprocess.run(["cmd", "/c", "mklink", "/J", str(root / "resources/linked"), str(target)], check=True, capture_output=True)
             self.assertTrue(is_reparse_point(root / "resources/linked"))
             with self.assertRaisesRegex(ValueError, "link or special file"):
-                prepare(root, root / "assets", "v1.2.3", "a" * 40, "windows-amd64")
+                prepare(root, root / "assets", "v1.2.3", "a" * 40, "windows-amd64", previous=older_generation_one)
 
     def test_tampering_after_staging_is_rejected_before_upload(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self.windows(root)
             output = root / "assets"
-            prepare(root, output, "v1.2.3", "a" * 40, "windows-amd64")
+            prepare(root, output, "v1.2.3", "a" * 40, "windows-amd64", previous=older_generation_one)
             (output / filenames("v1.2.3", "windows-amd64")[0]).write_bytes(b"replaced")
             with self.assertRaisesRegex(ValueError, "hash changed"):
                 inspect(output, "v1.2.3", "a" * 40, "windows-amd64")
@@ -126,7 +145,7 @@ class AppArtifactsTests(unittest.TestCase):
             root = Path(directory)
             self.windows(root)
             output = root / "assets"
-            prepare(root, output, "v1.2.3", "a" * 40, "windows-amd64")
+            prepare(root, output, "v1.2.3", "a" * 40, "windows-amd64", previous=older_generation_one)
             (output / "private.log").write_text("synthetic private output")
             with self.assertRaisesRegex(ValueError, "Unexpected"):
                 inspect(output, "v1.2.3", "a" * 40, "windows-amd64")
