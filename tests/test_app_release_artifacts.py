@@ -42,8 +42,8 @@ class AppArtifactsTests(unittest.TestCase):
             prepare(root, output, "v1.2.3", "a" * 40, "windows-amd64")
             receipt, files = inspect(output, "v1.2.3", "a" * 40, "windows-amd64")
             archive, = filenames("v1.2.3", "windows-amd64")
-            self.assertEqual({p.name for p in files}, {archive,
-                "SHA256SUMS-windows-amd64.txt", "companion-release-windows-amd64.json"})
+            self.assertEqual({p.name for p in files}, {archive, "SHA256SUMS-windows-amd64.txt",
+                "companion-release-windows-amd64.json", "companion-release-g2-windows-amd64.json"})
             self.assertEqual(receipt["signing"], "unsigned-windows")
             with zipfile.ZipFile(output / archive) as bundle:
                 self.assertEqual(set(bundle.namelist()), set(names) | WINDOWS_RESOURCE_FILES)
