@@ -1,0 +1,131 @@
+name: Companion bridge installer (draft only)
+
+# Builds the Electron-updater bridge installer from the verified Go release archive and its receipt, and creates it as a DRAFT in
+# the updater's repository. It never publishes: the draft is created with --draft, verified as a draft, and left for the owner.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Reviewed version tag (x.y.z, no pre-release) of the Go app in the private companion-engine repository
+        required: true
+        type: string
+      expected_sha:
+        description: Optional immutable tag-object SHA; a moved tag is refused
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: companion-bridge-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  # One job, in order: the publishing credential is present only while the Go archive is fetched and while the draft is created.
+  # The private engine is checked out after the fetch and before the build, and the build step holds no credential.
+  bridge-windows:
+    name: Bridge installer (Windows x64, draft only)
+    if: github.repository == 'AIOSCompanion/companion-builder' && github.ref == 'refs/heads/main'
+    runs-on: windows-2022
+    environment: release-signing
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      TAG: ${{ inputs.tag }}
+      APP_SOURCE_DIR: ${{ github.workspace }}/source
+      BRIDGE_INPUT_DIR: ${{ runner.temp }}/bridge-input
+      BRIDGE_OUT_DIR: ${{ runner.temp }}/bridge-out
+      LOG_RECIPIENT: ${{ vars.TEST_LOG_RECIPIENT }}
+      GOTOOLCHAIN: local
+    steps:
+      - name: Check out the trusted public builder at this workflow commit
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Protect the trusted scripts before any private code is present
+        run: python -I -B scripts/app_release_snapshot.py "$RUNNER_TEMP/trusted"
+      - name: Import the team public log key
+        env:
+          TEST_LOG_PUBLIC_KEY: ${{ vars.TEST_LOG_PUBLIC_KEY }}
+        run: printf '%s\n' "$TEST_LOG_PUBLIC_KEY" | gpg --batch --import >/dev/null 2>&1
+      - name: Create a read-only source identity token
+        id: source-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510
+        with:
+          app-id: ${{ vars.BUILDER_APP_ID }}
+          private-key: ${{ secrets.BUILDER_APP_PRIVATE_KEY }}
+          owner: AIOSCompanion
+          repositories: companion-engine
+          permission-contents: read
+      - name: Verify the immutable source tag and the Go release destination
+        id: identity
+        env:
+          GH_TOKEN: ${{ steps.source-token.outputs.token }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          APP_RELEASE_REPOSITORY: ${{ vars.APP_RELEASE_REPOSITORY }}
+        run: python -I -B scripts/app_release_identity.py
+      - name: Fetch and verify the Go release archive and receipt (no source present)
+        env:
+          GH_TOKEN: ${{ secrets.PUBLISH_RELEASES_TOKEN }}
+          APP_RELEASE_REPOSITORY: ${{ steps.identity.outputs.release_repository }}
+        run: >-
+          python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name fetch-go-archive
+          --log-dir "$RUNNER_TEMP/bridge-logs" --
+          python -I -B "$RUNNER_TEMP/trusted/bridge_release.py" fetch
+      - name: Create a read-only source checkout token
+        id: checkout-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510
+        with:
+          app-id: ${{ vars.BUILDER_APP_ID }}
+          private-key: ${{ secrets.BUILDER_APP_PRIVATE_KEY }}
+          owner: AIOSCompanion
+          repositories: companion-engine
+          permission-contents: read
+      - name: Check out private source at the validated immutable commit
+        env:
+          GH_TOKEN: ${{ steps.checkout-token.outputs.token }}
+          SOURCE_SHA: ${{ steps.identity.outputs.commit_sha }}
+        run: >-
+          python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name checkout-private-engine
+          --log-dir "$RUNNER_TEMP/bridge-logs" --
+          python -I -B "$RUNNER_TEMP/trusted/app_release.py" checkout
+      # The bridge script requires exactly Go 1.27.4 for windows/amd64; it checks this too.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.4'
+          cache: false
+      - name: Build the bridge installer from the verified archive (no credential in this step)
+        env:
+          SOURCE_SHA: ${{ steps.identity.outputs.commit_sha }}
+          TAG_OBJECT_SHA: ${{ steps.identity.outputs.tag_object_sha }}
+        run: >-
+          python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name build-bridge
+          --log-dir "$RUNNER_TEMP/bridge-logs" --
+          python -I -B "$RUNNER_TEMP/trusted/bridge_release.py" build
+      - name: Verify trusted scripts before the draft is created
+        run: python -I -B "$RUNNER_TEMP/trusted/snapshot_trusted.py" verify --dest "$RUNNER_TEMP/trusted"
+      - name: Create the bridge installer as an unpublished draft in the updater repository
+        env:
+          GH_TOKEN: ${{ secrets.PUBLISH_RELEASES_TOKEN }}
+        run: >-
+          python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name create-bridge-draft
+          --log-dir "$RUNNER_TEMP/bridge-logs" --
+          python -I -B "$RUNNER_TEMP/trusted/bridge_release.py" draft
+      - name: Verify the trusted snapshot before retaining logs
+        if: always()
+        run: python -I -B "$RUNNER_TEMP/trusted/snapshot_trusted.py" verify --dest "$RUNNER_TEMP/trusted"
+      - name: Retain encrypted logs only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sealed-bridge-logs
+          path: ${{ runner.temp }}/bridge-logs/*.gpg
+          retention-days: 1
+          if-no-files-found: ignore
