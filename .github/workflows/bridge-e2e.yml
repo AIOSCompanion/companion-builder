@@ -112,7 +112,7 @@ jobs:
           python -I -B scripts/bridge_release.py fetch 2>&1 | Tee-Object -FilePath (Join-Path $env:E2E_LOG_DIR 'fetch-go-inputs.log')
           if ($LASTEXITCODE -ne 0) { throw 'The public Go release inputs did not verify.' }
 
-      - name: Gate: the bridge build needs the private engine, which this public run cannot read
+      - name: "Gate: the bridge build needs the private engine, which this public run cannot read"
         shell: pwsh
         run: |
           $log = Join-Path $env:E2E_LOG_DIR 'engine-access.log'
