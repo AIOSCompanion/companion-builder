@@ -8,7 +8,7 @@ from app_release_artifacts import SHA
 from app_release_identity import SOURCE
 
 RESOURCE_SOURCE = "AIOSCompanion/aios-desktop-app"
-RESOURCE_SHA = "602df98f1b29ad822f052ccf895297b413fcdfdc"
+RESOURCE_SHA = "49391742837771b0535181aa11f8f6991cdac8e5"
 
 
 def checkout(env, run=subprocess.run, *, resources=False):
