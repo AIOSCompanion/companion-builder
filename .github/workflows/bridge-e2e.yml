@@ -39,17 +39,21 @@ jobs:
       GO_RELEASE_REPO: AIOSCompanion/companion-app-releases
       ENGINE_REPO: AIOSCompanion/companion-engine
       GH_TOKEN: ${{ github.token }}
-      E2E_LOG_DIR: ${{ runner.temp }}\e2e-logs
-      BRIDGE_INPUT_DIR: ${{ runner.temp }}\bridge-input
     steps:
       - name: Check out the public builder at this commit
         uses: actions/checkout@v4
         with:
           persist-credentials: false
 
-      - name: Create the log folder
+      # The runner context is not allowed in a job's env block, so the run's paths are set here, for the later steps.
+      - name: Create the log folder and export the run's paths
         shell: pwsh
-        run: New-Item -ItemType Directory -Force -Path $env:E2E_LOG_DIR | Out-Null
+        run: |
+          $logs = Join-Path $env:RUNNER_TEMP 'e2e-logs'
+          $bridgeInput = Join-Path $env:RUNNER_TEMP 'bridge-input'
+          New-Item -ItemType Directory -Force -Path $logs | Out-Null
+          "E2E_LOG_DIR=$logs" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "BRIDGE_INPUT_DIR=$bridgeInput" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Install the old app 0.18.0 silently from its public installer
         shell: pwsh
