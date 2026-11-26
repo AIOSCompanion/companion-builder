@@ -1,6 +1,7 @@
 """Strict allowlists and content receipts for the new app's downloadable assets."""
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -17,6 +18,19 @@ def version(tag):
     return tag[1:]
 
 
+def is_reparse_point(path):
+    """True for a Windows junction, a symlink or any other reparse point; False elsewhere and for a missing path.
+
+    Path.is_junction exists only on Python 3.12+, so the release checks read the reparse attribute, which every Windows Python
+    reports. It is broader than is_junction (a symlink counts too), and every caller refuses links anyway, so it only refuses more.
+    """
+    try:
+        attributes = getattr(os.lstat(path), "st_file_attributes", 0)
+    except (OSError, ValueError):
+        return False
+    return bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+
+
 WINDOWS_RESOURCE_FILES = {
     "resources/external_runtimes/node-win-x64/node.exe",
     "resources/external_runtimes/node-win-x64/LICENSE",
@@ -28,6 +42,9 @@ WINDOWS_RESOURCE_FILES = {
     "resources/default-mcps/companion-m365/server.mjs",
     *(f"resources/default-mcps/{name}/mcp.json" for name in
       ("companion-google", "companion-m365", "android-commander", "agent-browser-guard", "arc-desktop")),
+    # The ARC child (the old Companion Browser): the engine runs it only from these two files (profiledARC).
+    "resources/default-mcps/companion-arc/mcp.json",
+    "resources/companion_arc/companion-arc.cjs",
 }
 WINDOWS_RESOURCE_TREES = {
     "resources/external_runtimes/python-win-x64/",
@@ -73,16 +90,16 @@ GEN1_RESOURCE_TREES = frozenset({
     "resources/default-mcps/agent-browser-guard/",
     "resources/default-mcps/arc-desktop/",
 })
-# Generation 2 admits, and does not require, the two Companion Browser (ARC) files: AdmittedResourceFiles in
-# internal/releasearchive/archive.go (companion-engine commit 4182aa3e147d23e3a1b5b369cfb41fcc59139bf3). Its required
-# files and trees are generation 1's.
-GEN2_ADMITTED_FILES = frozenset({
+# Generation 2 adds the two Companion Browser (ARC) files and requires them: ResourceFiles in internal/releasearchive/archive.go
+# of companion-engine. The updater that reads generation 2 refuses an archive without them, so a generation-2 receipt never names
+# a release that lacks them. Generation 1 cannot read them, so an archive that carries them is never a generation-1 archive.
+GEN2_ARC_FILES = frozenset({
     "resources/companion_arc/companion-arc.cjs",
     "resources/default-mcps/companion-arc/mcp.json",
 })
 GENERATIONS = {
     1: {"required": GEN1_RESOURCE_FILES, "files": GEN1_RESOURCE_FILES, "trees": GEN1_RESOURCE_TREES},
-    2: {"required": GEN1_RESOURCE_FILES, "files": GEN1_RESOURCE_FILES | GEN2_ADMITTED_FILES,
+    2: {"required": GEN1_RESOURCE_FILES | GEN2_ARC_FILES, "files": GEN1_RESOURCE_FILES | GEN2_ARC_FILES,
         "trees": GEN1_RESOURCE_TREES},
 }
 # The receipt each platform publishes per generation. Generation 1 keeps the name the older updaters read.
@@ -138,12 +155,12 @@ def package_windows(root, tag):
     root = Path(root)
     binaries = verify_windows_outputs(root, tag)
     resources = root / "resources"
-    if not resources.is_dir() or resources.is_symlink() or resources.is_junction():
+    if not resources.is_dir() or resources.is_symlink() or is_reparse_point(resources):
         raise ValueError("Windows native resources are missing")
     members = dict((name, root / name) for name in binaries)
     for path in sorted(resources.rglob("*")):
         info = path.lstat()
-        if path.is_symlink() or path.is_junction() or not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)):
+        if path.is_symlink() or is_reparse_point(path) or not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)):
             raise ValueError("Windows release resources contain a link or special file")
         if path.is_dir():
             continue

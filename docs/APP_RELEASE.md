@@ -89,8 +89,8 @@ Both native rows check out the pin in `scripts/app_release_checkout.py` through
 the existing read-only GitHub App and use the matching hashed runtime asset.
 They stage the guarded browser, Google Workspace, Microsoft 365 and Android
 Commander and their runtimes before packaging. The Windows row also stages
-ARC Desktop. The portable Windows ZIP contains both executables alongside their
-`resources` folder. Extract the entire ZIP before running Companion.
+ARC Desktop and the Companion Browser (ARC) child. The portable Windows ZIP contains both
+executables alongside their `resources` folder. Extract the entire ZIP before running Companion.
 
 A credential-free step first checks the macOS bundle's structure and runs its
 executable's `version`. The signing step then checks the structure again without
@@ -126,7 +126,9 @@ generation's frozen list (`GENERATIONS` in `scripts/app_release_artifacts.py`). 
 does not, the receipt is the newest published release's receipt of that generation,
 copied byte for byte, and staging refuses unless that release is still published and
 still lists its archive and checksum with the same hashes. Nothing is set by hand, and
-no pointer is fabricated. Order matters for admitted-only files: see companion-engine
+no pointer is fabricated. Generations are not nested: generation 2 requires the ARC
+files that generation 1 refuses, so a release without them names itself for generation 1
+only and copies generation 2. Order matters for the required files: see companion-engine
 `docs/release-order.md`.
 
 **Recovering a failed run.** Signed macOS output is never byte-identical between

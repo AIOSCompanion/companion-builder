@@ -239,10 +239,11 @@ def finalize(repository, tag, source_sha, unsigned=False):
             for file, hash in hashes.items():
                 if by_name[file].get("digest") != "sha256:" + hash:
                     raise ValueError("Published draft bytes do not match their platform receipt")
-    # A release that extracts under generation 1 extracts under generation 2 too, so its generation-2 receipt is its own.
+    # Generations are not nested: generation 2 requires the ARC files that generation 1 refuses, so a release names itself for
+    # the generations its archive extracts under, and a copy for the others. A release that names itself for neither is not built.
     generation_one, generation_two = receipt_names("windows-amd64")
-    if own[generation_one] and not own[generation_two]:
-        raise ValueError("Platform receipts disagree: generation 2 must name this release when generation 1 does")
+    if not own[generation_one] and not own[generation_two]:
+        raise ValueError("No Windows platform receipt names this release")
     # This is a publication step but never publishes the draft. It marks the
     # complete validated asset set while explicitly retaining owner publication.
     checked_release = draft(repository, tag, source_sha, unsigned)

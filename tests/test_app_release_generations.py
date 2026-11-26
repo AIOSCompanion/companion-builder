@@ -1,8 +1,9 @@
 """Receipt generations: which Windows receipt names which release, and the copies that keep an older updater valid.
 
-Archives here are real zip files. A plain archive comes from the packer itself. An archive that carries the admitted-only
-Companion Browser (ARC) files is written by the packer's zip writer from the same staged files, because this release's
-packer refuses those files by design (test_the_packer_still_refuses_an_arc_file_so_this_release_cannot_carry_one).
+Archives here are real zip files written by the packer's zip writer from staged files. A release that carries the Companion Browser
+(ARC) pair is the packer's own archive: it extracts under generation 2 only. A generation-1 release, the stepping stone the 0.19.1 to
+0.19.3 updaters read, carries no ARC file: the packer requires the pair, so that archive is written past the packer and prepare() hashes
+it as it would a packed one.
 """
 import json
 from pathlib import Path
@@ -14,7 +15,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import app_release_artifacts
-from app_release_artifacts import (GEN1_RESOURCE_FILES, GEN1_RESOURCE_TREES, GEN2_ADMITTED_FILES, GENERATIONS,
+from app_release_artifacts import (GEN1_RESOURCE_FILES, GEN1_RESOURCE_TREES, GEN2_ARC_FILES, GENERATIONS,
                                    WINDOWS_RESOURCE_FILES, WINDOWS_RESOURCE_TREES, archive_names, digest, filenames,
                                    generation_problems, inspect, package_windows, prepare, windows_binaries,
                                    windows_receipts, write_release_archive)
@@ -25,8 +26,9 @@ G2 = "companion-release-g2-windows-amd64.json"
 CHECKSUM = "SHA256SUMS-windows-amd64.txt"
 ARC_FILES = ("resources/companion_arc/companion-arc.cjs", "resources/default-mcps/companion-arc/mcp.json")
 REPO = "AIOSCompanion/approved-app-downloads"
-NEW, OLD, OLDER = "v1.2.3", "v1.2.2", "v1.2.1"
-NEW_SHA, OLD_SHA, OLDER_SHA = "a" * 40, "c" * 40, "d" * 40
+NEW, OLD, OLDER, OLDEST = "v1.2.3", "v1.2.2", "v1.2.1", "v1.2.0"
+NEW_SHA, OLD_SHA, OLDER_SHA, OLDEST_SHA = "a" * 40, "c" * 40, "d" * 40, "9" * 40
+OWN = b'{"this release": true}\n'
 LISTING = f"https://api.github.com/repos/{REPO}/releases?per_page=10"
 
 
@@ -39,7 +41,7 @@ def download_url(tag, name):
 
 
 def stage_build(root, tag):
-    """A synthetic Windows build output: the two binaries, their checksum manifest and every resource the packer admits."""
+    """A synthetic Windows build output: the two binaries, their checksum manifest and every resource the packer requires."""
     names = windows_binaries(tag)
     for name in names:
         (root / name).write_bytes(b"synthetic " + name.encode())
@@ -49,46 +51,63 @@ def stage_build(root, tag):
         (root / name).write_bytes(b"synthetic resource " + name.encode())
 
 
-def write_arc_files(root):
-    for name in ARC_FILES:
-        (root / name).parent.mkdir(parents=True, exist_ok=True)
-        (root / name).write_bytes(b"synthetic ARC " + name.encode())
-
-
-def archive_of(root, tag, *, extra=(), omit=()):
-    """A real release archive from the staged files, written by the packer's zip writer."""
-    members = [*windows_binaries(tag), *sorted(WINDOWS_RESOURCE_FILES), *extra]
+def archive_of(root, tag, *, omit=()):
+    """A release archive from the staged files, written by the packer's zip writer, without the names in omit."""
+    members = [*windows_binaries(tag), *sorted(WINDOWS_RESOURCE_FILES)]
     return write_release_archive(root / filenames(tag, "windows-amd64")[0],
                                  {name: root / name for name in members if name not in omit})
 
 
-def stage_release(directory, tag, sha, previous=None, *, arc=False):
+def arc_archive(directory, tag):
+    """A release archive carrying the ARC pair (generation 2's shape), as a path."""
+    root = Path(directory) / "arc-build"
+    root.mkdir(parents=True)
+    stage_build(root, tag)
+    return archive_of(root, tag)
+
+
+def pointer_to(tag, source_sha):
+    """The bytes of a valid copied receipt that names tag. Its archive and checksum hashes are synthetic: a copy is checked against
+    GitHub's listing of the release it names (pointer_listing), not against the archive, which this test does not hold."""
+    assets = {filenames(tag, "windows-amd64")[0]: "b" * 64, CHECKSUM: "c" * 64}
+    receipt = {"schema": 1, "source_sha": source_sha, "tag": tag, "version": tag[1:], "platform": "windows-amd64",
+               "signing": "unsigned-windows", "assets": assets}
+    return (json.dumps(receipt, sort_keys=True, indent=2) + "\n").encode("utf-8")
+
+
+def pointer_listing(raw):
+    """GitHub's listing of the release a copied receipt names: its archive and checksum, with the receipt's hashes."""
+    receipt = json.loads(raw)
+    return {"tag_name": receipt["tag"], "draft": False, "assets": [
+        {"name": name, "digest": "sha256:" + value, "size": 1, "browser_download_url": download_url(receipt["tag"], name)}
+        for name, value in receipt["assets"].items()]}
+
+
+def from_older(generation_one_bytes):
+    """A copy source for a release that carries the ARC pair: the older release's generation-1 receipt, and no generation-2 copy."""
+    return lambda name: generation_one_bytes if name == G1 else None
+
+
+def stage_release(directory, tag, sha, previous=None, *, generation=2):
     """Stage a Windows release with prepare() and return its assets folder.
 
-    With arc, the archive also carries the ARC files. The packer refuses them, so it is bypassed for this one archive
-    and prepare() copies and hashes the archive it is handed, exactly as it does for a packed one.
+    generation 2 (the default) is the packer's own archive, which carries the ARC pair, so it needs a generation-1 copy. generation 1 is
+    the stepping stone: an archive without the ARC pair, written past the packer, which needs a generation-2 copy. Its default copy names
+    an older synthetic release, since the stepping stone's own generation-2 receipt is a copy too.
     """
     root = Path(directory) / "build"
     root.mkdir(parents=True)
     stage_build(root, tag)
     output = Path(directory) / "assets"
-    if not arc:
+    if generation == 2:
         prepare(root, output, tag, sha, "windows-amd64", previous=previous)
-    else:
-        write_arc_files(root)
-        archive_of(root, tag, extra=ARC_FILES)
-        with patch.object(app_release_artifacts, "package_windows", lambda folder, value: root / filenames(value, "windows-amd64")[0]):
-            prepare(root, output, tag, sha, "windows-amd64", previous=previous)
+        return output
+    archive = archive_of(root, tag, omit=ARC_FILES)
+    if previous is None:
+        previous = lambda name: pointer_to(OLDEST, OLDEST_SHA) if name == G2 else None  # noqa: E731
+    with patch.object(app_release_artifacts, "package_windows", lambda folder, value: archive):
+        prepare(root, output, tag, sha, "windows-amd64", previous=previous)
     return output
-
-
-def arc_archive(directory, tag):
-    """A release archive carrying the ARC files, as a path, for the pointer computation itself."""
-    root = Path(directory) / "arc-build"
-    root.mkdir(parents=True)
-    stage_build(root, tag)
-    write_arc_files(root)
-    return archive_of(root, tag, extra=ARC_FILES)
 
 
 def files_of(folder):
@@ -122,98 +141,115 @@ class PublicGitHub:
 
 
 class GenerationFixtureTests(unittest.TestCase):
-    def test_this_release_packs_exactly_the_generation_one_allow_list(self):
-        # Until release N+1 widens the packer on purpose, an archive this release packs must extract under generation 1.
-        self.assertEqual(WINDOWS_RESOURCE_FILES, GEN1_RESOURCE_FILES)
+    def test_this_release_packs_generation_one_plus_the_arc_pair(self):
+        # The packer carries the ARC pair, so an archive this release packs extracts under generation 2 and not under generation 1.
+        self.assertEqual(WINDOWS_RESOURCE_FILES, GEN1_RESOURCE_FILES | frozenset(ARC_FILES))
         self.assertEqual(WINDOWS_RESOURCE_TREES, GEN1_RESOURCE_TREES)
 
-    def test_generation_two_admits_exactly_the_two_arc_files_and_requires_no_more(self):
-        self.assertEqual(GEN2_ADMITTED_FILES, frozenset(ARC_FILES))
-        self.assertEqual(GENERATIONS[2]["files"] - GENERATIONS[1]["files"], frozenset(ARC_FILES))
-        self.assertEqual(GENERATIONS[2]["required"], GENERATIONS[1]["required"])
+    def test_generation_two_requires_exactly_the_two_arc_files_on_top_of_generation_one(self):
+        self.assertEqual(GEN2_ARC_FILES, frozenset(ARC_FILES))
+        self.assertEqual(GENERATIONS[2]["required"] - GENERATIONS[1]["required"], frozenset(ARC_FILES))
+        self.assertEqual(GENERATIONS[2]["files"], GENERATIONS[2]["required"])
         self.assertEqual(GENERATIONS[2]["trees"], GENERATIONS[1]["trees"])
 
-    def test_the_packer_still_refuses_an_arc_file_so_this_release_cannot_carry_one(self):
+    def test_the_packer_refuses_a_release_without_the_arc_pair(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             stage_build(root, NEW)
-            write_arc_files(root)
-            with self.assertRaisesRegex(ValueError, "unexpected resource"):
+            (root / ARC_FILES[0]).unlink()
+            with self.assertRaisesRegex(ValueError, "missing a required Companion MCP resource"):
                 package_windows(root, NEW)
 
 
 class ArchiveEntryTests(unittest.TestCase):
-    def test_a_release_archive_from_the_packer_extracts_under_both_generations(self):
+    def test_a_release_archive_from_the_packer_extracts_under_generation_two_and_not_one(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             stage_build(root, NEW)
-            archive = package_windows(root, NEW)
-            names = archive_names(archive)
-            self.assertEqual(generation_problems(names, NEW, 1), [])
-            self.assertEqual(generation_problems(names, NEW, 2), [])
-
-    def test_an_archive_with_an_admitted_only_file_extracts_under_generation_two_and_not_one(self):
-        with tempfile.TemporaryDirectory() as directory:
-            names = archive_names(arc_archive(directory, NEW))
+            names = archive_names(package_windows(root, NEW))
             self.assertEqual(generation_problems(names, NEW, 2), [])
             self.assertEqual(sorted(generation_problems(names, NEW, 1)),
                              sorted(f"unexpected entry {name}" for name in ARC_FILES))
+
+    def test_an_archive_without_the_arc_pair_extracts_under_generation_one_and_not_two(self):
+        # The builder must never point generation 2 at such an archive: the updater that reads generation 2 refuses it.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stage_build(root, NEW)
+            names = archive_names(archive_of(root, NEW, omit=ARC_FILES))
+            self.assertEqual(generation_problems(names, NEW, 1), [])
+            self.assertEqual(sorted(generation_problems(names, NEW, 2)), sorted(f"missing {name}" for name in ARC_FILES))
 
     def test_an_archive_missing_a_required_resource_extracts_under_neither_generation(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             stage_build(root, NEW)
-            archive = archive_of(root, NEW, omit=("resources/arc_desktop/arc-desktop.exe",))
-            names = archive_names(archive)
+            names = archive_names(archive_of(root, NEW, omit=("resources/arc_desktop/arc-desktop.exe",)))
             for generation in (1, 2):
                 with self.subTest(generation=generation):
-                    self.assertEqual(generation_problems(names, NEW, generation),
-                                     ["missing resources/arc_desktop/arc-desktop.exe"])
+                    self.assertIn("missing resources/arc_desktop/arc-desktop.exe", generation_problems(names, NEW, generation))
 
 
 class PointerTests(unittest.TestCase):
-    def test_a_release_that_extracts_under_every_generation_publishes_its_own_receipt_for_both(self):
+    def test_a_release_with_the_arc_pair_names_itself_for_generation_two_and_copies_generation_one(self):
         with tempfile.TemporaryDirectory() as directory:
-            own = (stage_release(directory, NEW, NEW_SHA) / G1).read_bytes()
-            archive = Path(directory) / "assets" / filenames(NEW, "windows-amd64")[0]
-            receipts = windows_receipts(archive, NEW, own, previous=None)
-            self.assertEqual(set(receipts), {G1, G2})
-            self.assertEqual(receipts[G1], own)
-            self.assertEqual(receipts[G2], own)
-            self.assertEqual(json.loads(own)["tag"], NEW)
+            older_g1 = (stage_release(Path(directory) / "older", OLD, OLD_SHA, generation=1) / G1).read_bytes()
+            folder = stage_release(Path(directory) / "new", NEW, NEW_SHA, previous=from_older(older_g1))
+            self.assertEqual((folder / G1).read_bytes(), older_g1)
+            self.assertEqual(json.loads((folder / G2).read_bytes())["tag"], NEW)
 
-    def test_an_archive_carrying_an_admitted_only_file_must_not_move_the_generation_one_pointer(self):
+    def test_a_release_without_the_arc_pair_names_itself_for_generation_one_and_copies_generation_two(self):
         with tempfile.TemporaryDirectory() as directory:
-            older_receipts = stage_release(Path(directory) / "older", OLD, OLD_SHA)
-            older_g1 = (older_receipts / G1).read_bytes()
-            own = (stage_release(Path(directory) / "plain", NEW, NEW_SHA) / G1).read_bytes()
+            folder = stage_release(Path(directory), NEW, NEW_SHA, generation=1)
+            self.assertEqual(json.loads((folder / G1).read_bytes())["tag"], NEW)
+            self.assertEqual((folder / G2).read_bytes(), pointer_to(OLDEST, OLDEST_SHA))
+
+    def test_a_0195_shaped_release_copies_the_0194_generation_one_receipt_and_names_0195_for_generation_two(self):
+        # The release the owner ships: its archive carries the ARC pair, so generation 1 refuses it. Its generation-1 receipt is the
+        # v0.19.4 stepping stone's, byte for byte, and its generation-2 receipt names v0.19.5 and no other release.
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            stepping = stage_release(base / "0194", "v0.19.4", "1" * 40, generation=1)
+            g1_0194 = (stepping / G1).read_bytes()
+            folder = stage_release(base / "0195", "v0.19.5", "2" * 40, previous=from_older(g1_0194))
+            self.assertEqual((folder / G1).read_bytes(), g1_0194)
+            own = json.loads((folder / G2).read_bytes())
+            self.assertEqual((own["tag"], own["version"], own["source_sha"]), ("v0.19.5", "0.19.5", "2" * 40))
+            receipt, _ = inspect(folder, "v0.19.5", "2" * 40, "windows-amd64")
+            self.assertEqual(receipt["tag"], "v0.19.4", "the generation-1 receipt is the stepping stone")
+            names = archive_names(folder / filenames("v0.19.5", "windows-amd64")[0])
+            self.assertEqual(generation_problems(names, "v0.19.5", 2), [])
+            self.assertEqual(sorted(generation_problems(names, "v0.19.5", 1)),
+                             sorted(f"unexpected entry {name}" for name in ARC_FILES))
+
+    def test_an_archive_carrying_the_arc_pair_must_not_move_the_generation_one_pointer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            older_g1 = (stage_release(Path(directory) / "older", OLD, OLD_SHA, generation=1) / G1).read_bytes()
             calls = []
 
             def previous(name):
                 calls.append(name)
                 return older_g1 if name == G1 else None
 
-            receipts = windows_receipts(arc_archive(Path(directory) / "arc", NEW), NEW, own, previous)
+            receipts = windows_receipts(arc_archive(Path(directory) / "arc", NEW), NEW, OWN, previous)
             self.assertEqual(receipts[G1], older_g1, "the generation-1 pointer is the older release's receipt, byte for byte")
-            self.assertEqual(receipts[G2], own, "generation 2 admits the ARC file, so it names this release")
+            self.assertEqual(receipts[G2], OWN, "generation 2 requires the ARC files, so it names this release")
             self.assertEqual(calls, [G1], "only the generation the archive misses asks for a copy")
 
     def test_without_a_published_copy_a_generation_the_archive_misses_refuses_publishing(self):
         with tempfile.TemporaryDirectory() as directory:
-            own = (stage_release(Path(directory) / "plain", NEW, NEW_SHA) / G1).read_bytes()
-            archive = arc_archive(Path(directory) / "arc", NEW)
+            archive = arc_archive(directory, NEW)
             with self.assertRaisesRegex(ValueError, f"generation 1.*no valid {G1}.*refusing to publish"):
-                windows_receipts(archive, NEW, own, previous=lambda name: None)
+                windows_receipts(archive, NEW, OWN, previous=lambda name: None)
             with self.assertRaisesRegex(ValueError, "refusing to publish"):
-                windows_receipts(archive, NEW, own, previous=None)
+                windows_receipts(archive, NEW, OWN, previous=None)
 
     def test_a_copied_receipt_that_names_this_release_or_is_not_self_consistent_is_never_used(self):
         with tempfile.TemporaryDirectory() as directory:
-            own = (stage_release(Path(directory) / "plain", NEW, NEW_SHA) / G1).read_bytes()
-            older = json.loads((stage_release(Path(directory) / "older", OLD, OLD_SHA) / G1).read_bytes())
+            older = json.loads((stage_release(Path(directory) / "older", OLD, OLD_SHA, generation=1) / G1).read_bytes())
             archive = arc_archive(Path(directory) / "arc", NEW)
             cases = {
-                "names this release": (own, "does not name an older release"),
+                "names this release": (as_bytes({**older, "tag": NEW}), "does not name an older release"),
                 "not JSON": (b"not a receipt", "not JSON"),
                 "version disagrees with its tag": (as_bytes({**older, "version": "9.9.9"}), "not self-consistent"),
                 "an asset is missing": (as_bytes({**older, "assets": {
@@ -222,25 +258,24 @@ class PointerTests(unittest.TestCase):
             }
             for label, (copy, message) in cases.items():
                 with self.subTest(case=label), self.assertRaisesRegex(ValueError, message):
-                    windows_receipts(archive, NEW, own, previous=lambda name, copy=copy: copy)
+                    windows_receipts(archive, NEW, OWN, previous=lambda name, copy=copy: copy)
 
     def test_prepare_copies_the_older_generation_one_receipt_and_inspect_accepts_the_folder(self):
         with tempfile.TemporaryDirectory() as directory:
-            older_g1 = (stage_release(Path(directory) / "older", OLD, OLD_SHA) / G1).read_bytes()
-            folder = stage_release(Path(directory) / "new", NEW, NEW_SHA, previous=lambda name: older_g1, arc=True)
+            older_g1 = (stage_release(Path(directory) / "older", OLD, OLD_SHA, generation=1) / G1).read_bytes()
+            folder = stage_release(Path(directory) / "new", NEW, NEW_SHA, previous=from_older(older_g1))
             self.assertEqual((folder / G1).read_bytes(), older_g1)
             self.assertEqual(json.loads((folder / G2).read_bytes())["tag"], NEW)
             receipt, files = inspect(folder, NEW, NEW_SHA, "windows-amd64")
             self.assertEqual(receipt["tag"], OLD, "the generation-1 receipt is the pointer")
-            self.assertEqual({path.name for path in files},
-                             {filenames(NEW, "windows-amd64")[0], CHECKSUM, G1, G2})
+            self.assertEqual({path.name for path in files}, {filenames(NEW, "windows-amd64")[0], CHECKSUM, G1, G2})
 
 
 class BindingTests(unittest.TestCase):
     def test_inspect_refuses_a_generation_one_receipt_that_claims_this_release_when_its_archive_carries_an_arc_file(self):
         with tempfile.TemporaryDirectory() as directory:
-            older_g1 = (stage_release(Path(directory) / "older", OLD, OLD_SHA) / G1).read_bytes()
-            folder = stage_release(Path(directory) / "new", NEW, NEW_SHA, previous=lambda name: older_g1, arc=True)
+            older_g1 = (stage_release(Path(directory) / "older", OLD, OLD_SHA, generation=1) / G1).read_bytes()
+            folder = stage_release(Path(directory) / "new", NEW, NEW_SHA, previous=from_older(older_g1))
             (folder / G1).write_bytes((folder / G2).read_bytes())
             with self.assertRaisesRegex(ValueError, "does not name an older release"):
                 inspect(folder, NEW, NEW_SHA, "windows-amd64")
@@ -253,7 +288,7 @@ class NewestPublishedCopyTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         base = Path(self.directory.name)
-        self.older_folder = stage_release(base / "older", OLD, OLD_SHA)
+        self.older_folder = stage_release(base / "older", OLD, OLD_SHA, generation=1)
         self.older_files = files_of(self.older_folder)
         self.older_g1 = (self.older_folder / G1).read_bytes()
 
@@ -270,13 +305,13 @@ class NewestPublishedCopyTests(unittest.TestCase):
         self.assertEqual(github.urls[0], LISTING)
 
     def test_a_draft_is_never_the_source_of_a_copy(self):
-        draft_files = files_of(stage_release(Path(self.directory.name) / "draft", "v1.2.4", "e" * 40))
+        draft_files = files_of(stage_release(Path(self.directory.name) / "draft", "v1.2.4", "e" * 40, generation=1))
         github, fetch = self.fetch([release_json("v1.2.4", draft_files, draft=True), release_json(OLD, self.older_files)])
         self.assertEqual(fetch(), self.older_g1)
         self.assertNotIn(download_url("v1.2.4", G1), github.urls)
 
     def test_a_newest_release_without_the_generation_receipt_gives_no_copy_and_no_walk_back(self):
-        older_still = files_of(stage_release(Path(self.directory.name) / "still", OLDER, OLDER_SHA))
+        older_still = files_of(stage_release(Path(self.directory.name) / "still", OLDER, OLDER_SHA, generation=1))
         github, fetch = self.fetch([release_json(OLD, self.older_files, omit=(G1,)), release_json(OLDER, older_still)])
         self.assertIsNone(fetch(), "an older release's receipt must not stand in for a newest one that lacks it")
         self.assertEqual(github.urls, [LISTING])
@@ -301,9 +336,9 @@ class NewestPublishedCopyTests(unittest.TestCase):
             previous_receipt(REPO, G1, "windows-amd64", NEW, read=github)
 
     def test_a_copy_of_a_copy_is_checked_against_the_release_that_holds_the_bytes(self):
-        older_folder = stage_release(Path(self.directory.name) / "v121", OLDER, OLDER_SHA)
+        older_folder = stage_release(Path(self.directory.name) / "v121", OLDER, OLDER_SHA, generation=1)
         older_bytes = (older_folder / G1).read_bytes()
-        chained = stage_release(Path(self.directory.name) / "chain", OLD, OLD_SHA, previous=lambda name: older_bytes, arc=True)
+        chained = stage_release(Path(self.directory.name) / "chain", OLD, OLD_SHA, previous=from_older(older_bytes))
         chained_files = files_of(chained)
         chained_g1 = (chained / G1).read_bytes()
         table = {
@@ -327,9 +362,9 @@ class FinalizeTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         base = Path(self.directory.name)
-        self.older_folder = stage_release(base / "older", OLD, OLD_SHA)
+        self.older_folder = stage_release(base / "older", OLD, OLD_SHA, generation=1)
         self.older_files = files_of(self.older_folder)
-        self.new_folder = stage_release(base / "new", NEW, NEW_SHA, previous=lambda name: (self.older_folder / G1).read_bytes(), arc=True)
+        self.new_folder = stage_release(base / "new", NEW, NEW_SHA, previous=from_older((self.older_folder / G1).read_bytes()))
         darwin_root = base / "darwin"
         darwin_root.mkdir()
         (darwin_root / filenames(NEW, "darwin-arm64")[0]).write_bytes(b"synthetic darwin")
@@ -374,16 +409,16 @@ class FinalizeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "no longer lists its archive and checksum"):
             self.run_finalize(self.windows_and_darwin(files_of(self.new_folder)), named)
 
-    def test_finalize_refuses_a_generation_two_pointer_when_generation_one_names_this_release(self):
-        # Generation 1 is contained in generation 2, so a release that is its own for generation 1 is its own for generation 2.
-        plain = stage_release(Path(self.directory.name) / "plain", NEW, NEW_SHA)
-        staged = Path(self.directory.name) / "mixed"
-        staged.mkdir()
-        for path in files_of(plain):
-            (staged / path.name).write_bytes(path.read_bytes())
-        (staged / G2).write_bytes((self.older_folder / G2).read_bytes())
-        with self.assertRaisesRegex(ValueError, "generation 2 must name this release"):
-            self.run_finalize(self.windows_and_darwin(files_of(staged)), release_json(OLD, self.older_files))
+    def test_finalize_accepts_a_release_that_names_itself_for_generation_one_and_copies_generation_two(self):
+        # A release without the ARC pair extracts under generation 1 only: it names itself there and copies generation 2 from the newest
+        # published release that holds one. The copy's named release is the one GitHub lists for it.
+        copy = pointer_to(OLD, OLD_SHA)
+        stepping = stage_release(Path(self.directory.name) / "stepping", NEW, NEW_SHA, generation=1,
+                                 previous=lambda name: copy if name == G2 else None)
+        api = self.run_finalize(self.windows_and_darwin(files_of(stepping)), pointer_listing(copy))
+        methods = [call.args[:2] for call in api.call_args_list]
+        self.assertIn(("GET", f"repos/{REPO}/releases/tags/{OLD}"), methods)
+        self.assertEqual(methods[-1], ("PATCH", f"repos/{REPO}/releases/77"))
 
 
 if __name__ == "__main__":

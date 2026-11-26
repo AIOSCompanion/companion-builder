@@ -131,8 +131,15 @@ def stage_resources(source, env, tag, platform):
     if windows:
         with resource_stage(25, "ARC Desktop"):
             checked(["node", "scripts/stage-arc-desktop.mjs", "--test"], cwd=legacy, env=child)
+    # The ARC child (the old Companion Browser) is built from the pinned desktop source on every platform. Its bundle
+    # needs the desktop's own dependencies (esbuild, ws, ajv), installed with the same scripts-free npm ci the desktop
+    # uses for its own staging.
+    with resource_stage(26, "ARC child dependencies"):
+        checked([npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund"], cwd=legacy, env=child)
+    with resource_stage(27, "ARC child bundle"):
+        checked(["node", "scripts/build-arc-child.mjs"], cwd=legacy, env=child)
     row = dict(child, ROW_OS="Windows" if windows else "macOS", ROW_ARCH="x64" if windows else "arm64")
-    with resource_stage(26, "Android MCP dependencies"):
+    with resource_stage(28, "Android MCP dependencies"):
         bash = "bash"
         if windows:
             git = shutil.which("git.exe", path=child.get("PATH"))
@@ -151,14 +158,28 @@ def stage_resources(source, env, tag, platform):
         destination = dist / f"Companion_{version(tag)}_darwin_arm64.app/Contents/Resources"
         if not destination.is_dir() or not (destination / "AppIcon.icns").is_file():
             raise ValueError("App bundle is missing before resource staging")
-    with resource_stage(27, "assembled package"):
+    with resource_stage(29, "assembled package"):
         checked(["node", str(source / "scripts/stage-desktop-mcps.mjs"), str(legacy), str(runtimes), str(destination)],
                 cwd=source, env=child)
+        check_companion_arc(destination)
         if windows:
             checked([str(destination / "external_runtimes/node-win-x64/node.exe"), "--version"], cwd=destination, env=child)
         else:
             check_macos_runtimes(destination, child)
     print("Staged and verified native Companion MCP resources")
+
+
+# The first-party ARC child, the old Companion Browser, that the engine runs as the companion-arc default MCP. The
+# engine recognises it only by its staged file (profiledARC), so a package without it ships an app whose browser is
+# silently absent. Every platform carries both files; the Windows allow-list (app_release_artifacts.py) names the same.
+COMPANION_ARC_FILES = ("companion_arc/companion-arc.cjs", "default-mcps/companion-arc/mcp.json")
+
+
+def check_companion_arc(resources):
+    for name in COMPANION_ARC_FILES:
+        file = Path(resources) / name
+        if file.is_symlink() or not file.is_file() or not file.stat().st_size:
+            raise ValueError("The Companion ARC child is missing from the package: " + name)
 
 
 def check_macos_runtimes(resources, env=None):
