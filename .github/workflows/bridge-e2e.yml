@@ -1,0 +1,130 @@
+name: Bridge e2e (old 0.18.0 -> Go app)
+
+# Proves, on a clean Windows runner, that the previous Electron Companion (0.18.0) reaches the Go app through its own updater.
+# Public assets only: no secrets and no release-signing environment. Nothing here touches a person's computer.
+#
+# Status (see the PR description): this run covers the parts that need only public inputs: the silent install of the public 0.18.0
+# installer and the verified public Go release inputs. The bridge build (scripts/package-bridge.ps1, cmd/bridge-pack and
+# cmd/companion-takeover) lives in the private companion-engine repository and needs a read credential this public workflow does
+# not have, so the run stops at the gate below. The update, data-import and verification steps are not written yet.
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/bridge-e2e.yml'
+  workflow_dispatch:
+    inputs:
+      go_tag:
+        description: Public Go release tag (x.y.z) the bridge is built from
+        required: false
+        default: v0.19.1
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bridge-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bridge-e2e:
+    name: Old 0.18.0 to the Go app (Windows x64)
+    runs-on: windows-2022
+    timeout-minutes: 45
+    env:
+      GO_TAG: ${{ inputs.go_tag || 'v0.19.1' }}
+      OLD_TAG: v0.18.0
+      OLD_INSTALLER: Companion-Setup-x64-0.18.0.exe
+      OLD_RELEASE_REPO: AIOSCompanion/aios-companion-releases
+      GO_RELEASE_REPO: AIOSCompanion/companion-app-releases
+      ENGINE_REPO: AIOSCompanion/companion-engine
+      GH_TOKEN: ${{ github.token }}
+      E2E_LOG_DIR: ${{ runner.temp }}\e2e-logs
+      BRIDGE_INPUT_DIR: ${{ runner.temp }}\bridge-input
+    steps:
+      - name: Check out the public builder at this commit
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Create the log folder
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force -Path $env:E2E_LOG_DIR | Out-Null
+
+      - name: Install the old app 0.18.0 silently from its public installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $log = Join-Path $env:E2E_LOG_DIR 'old-install.log'
+          $dir = Join-Path $env:RUNNER_TEMP 'old-installer'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          gh release download $env:OLD_TAG --repo $env:OLD_RELEASE_REPO --pattern $env:OLD_INSTALLER --dir $dir
+          if ($LASTEXITCODE -ne 0) { throw 'The 0.18.0 installer could not be downloaded.' }
+          $file = Join-Path $dir $env:OLD_INSTALLER
+          $release = (gh api "repos/$env:OLD_RELEASE_REPO/releases/tags/$env:OLD_TAG") | ConvertFrom-Json
+          $asset = $release.assets | Where-Object { $_.name -eq $env:OLD_INSTALLER }
+          $expected = $asset.digest
+          $actual = 'sha256:' + (Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash.ToLowerInvariant()
+          "installer digest: expected $expected actual $actual" | Tee-Object -FilePath $log -Append
+          if ($expected -ne $actual) { throw 'The 0.18.0 installer does not match the digest GitHub recorded for it.' }
+          $p = Start-Process -FilePath $file -ArgumentList '/S' -Wait -PassThru
+          "installer exit code: $($p.ExitCode)" | Tee-Object -FilePath $log -Append
+          if ($p.ExitCode -ne 0) { throw "The 0.18.0 installer exited with $($p.ExitCode)." }
+
+      - name: Record what the old install left behind
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:E2E_LOG_DIR 'old-install-state.log'
+          $install = Join-Path $env:LOCALAPPDATA 'Programs\Companion'
+          "install folder: $install (exists: $(Test-Path $install))" | Out-File $log
+          if (Test-Path $install) {
+            Get-ChildItem -LiteralPath $install -Force | ForEach-Object { "  $($_.Name)" } | Out-File $log -Append
+            $exe = Join-Path $install 'Companion.exe'
+            if (Test-Path $exe) { "Companion.exe file version: $((Get-Item $exe).VersionInfo.FileVersion)" | Out-File $log -Append }
+            $feed = Join-Path $install 'resources\app-update.yml'
+            if (Test-Path $feed) { "--- resources\app-update.yml ---" | Out-File $log -Append; Get-Content -LiteralPath $feed | Out-File $log -Append }
+          }
+          "--- uninstall entries named Companion ---" | Out-File $log -Append
+          Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' | ForEach-Object {
+            $p = Get-ItemProperty $_.PSPath
+            if ($p.DisplayName -like '*Companion*') {
+              "key $($_.PSChildName): DisplayName=$($p.DisplayName) DisplayVersion=$($p.DisplayVersion) InstallLocation=$($p.InstallLocation) UninstallString=$($p.UninstallString)" | Out-File $log -Append
+            }
+          }
+          Get-Content $log
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Fetch and verify the public Go release inputs (the fetch step of bridge-release.yml)
+        shell: pwsh
+        env:
+          TAG: ${{ env.GO_TAG }}
+          APP_RELEASE_REPOSITORY: ${{ env.GO_RELEASE_REPO }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path $env:BRIDGE_INPUT_DIR | Out-Null
+          python -I -B scripts/bridge_release.py fetch 2>&1 | Tee-Object -FilePath (Join-Path $env:E2E_LOG_DIR 'fetch-go-inputs.log')
+          if ($LASTEXITCODE -ne 0) { throw 'The public Go release inputs did not verify.' }
+
+      - name: Gate: the bridge build needs the private engine, which this public run cannot read
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:E2E_LOG_DIR 'engine-access.log'
+          $out = & gh api "repos/$env:ENGINE_REPO" --jq '.full_name' 2>&1
+          "GET repos/$env:ENGINE_REPO with the run's token: exit $LASTEXITCODE; output: $out" | Tee-Object -FilePath $log
+          Write-Output "::error::BLOCKED: scripts/package-bridge.ps1, cmd/bridge-pack and cmd/companion-takeover are in the private $env:ENGINE_REPO repository. This public run has no read credential for it, and the e2e does not add one without the owner's decision. The bridge build, the update and the verification steps cannot run until that is decided."
+          exit 1
+
+      - name: Upload logs (3 days)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bridge-e2e-logs
+          path: |
+            ${{ env.E2E_LOG_DIR }}
+            ${{ env.BRIDGE_INPUT_DIR }}\companion-release-windows-amd64.json
+            ${{ env.BRIDGE_INPUT_DIR }}\SHA256SUMS-windows-amd64.txt
+          retention-days: 3
+          if-no-files-found: warn
