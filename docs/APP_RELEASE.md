@@ -47,6 +47,13 @@ breaks are accepted), `CSC_KEY_PASSWORD`, `APPLE_API_KEY` (P8 text),
 `APPLE_API_KEY_ID` and `APPLE_API_ISSUER` environment secrets. Publisher
 credentials exist only on draft creation, upload and finalization steps.
 
+The Windows staging step reads the newest published receipt of a generation it
+must copy from the public destination. It authenticates those API reads with the
+job's own read-only `GITHUB_TOKEN`, passed as `PUBLIC_READ_TOKEN` to that step
+alone. Anonymous calls share GitHub's 60-an-hour limit on hosted runners, and
+release builds failed on it. The job token cannot write to the destination, is
+sent only to `api.github.com`, and is dropped on any redirect to another host.
+
 The Apple secrets are referenced by one step of the macOS job only: sign,
 notarize and staple. Windows and macOS are separate jobs because GitHub sends a
 job's runner every secret that job references; the Windows job, which runs npm

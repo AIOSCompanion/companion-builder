@@ -5,6 +5,7 @@ the team key; the public log shows the step's exit code, duration and error clas
 why in the decrypted log, which is what the owner needs to recover a release.
 """
 import argparse
+import functools
 import os
 from pathlib import Path
 import subprocess
@@ -135,8 +136,11 @@ def main():
             previous = None
             if args.platform == "windows-amd64":
                 # A generation this archive misses copies the newest published release's receipt of that generation.
-                from app_release_publish import previous_receipt
-                previous = lambda name: previous_receipt(env.get("APP_RELEASE_REPOSITORY", ""), name, args.platform, tag)
+                # PUBLIC_READ_TOKEN is the job's read-only GITHUB_TOKEN, given to this step alone. A local run sets none.
+                from app_release_publish import previous_receipt, read_public
+                token = env.get("PUBLIC_READ_TOKEN") or None
+                previous = lambda name: previous_receipt(env.get("APP_RELEASE_REPOSITORY", ""), name, args.platform, tag,
+                                                         read=functools.partial(read_public, token=token))
             prepare(dist, env["APP_ASSET_DIR"], tag, sha, args.platform, unsigned, previous)
         elif args.command == "draft":
             from app_release_publish import draft

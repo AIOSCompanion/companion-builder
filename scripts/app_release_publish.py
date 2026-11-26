@@ -14,8 +14,8 @@ import re
 import subprocess
 import tempfile
 import time
-from urllib.parse import quote
-from urllib.request import Request, urlopen
+from urllib.parse import quote, urlsplit
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from app_release_identity import validate_destination
 from app_release_artifacts import SHA, digest, filenames, inspect, receipt_names, signing_for, validate_pointer, version
@@ -113,10 +113,32 @@ def draft(repository, tag, source_sha, unsigned=False, *, create=False, request=
     return release
 
 
-def read_public(url, limit):
-    """An unauthenticated GET of a public GitHub URL. The build job holds no credential for the destination, and needs none."""
-    accept = "application/vnd.github+json" if url.startswith("https://api.github.com/") else "application/octet-stream"
-    with urlopen(Request(url, headers={"Accept": accept, "User-Agent": "companion-builder"}), timeout=60) as response:
+class CredentialBoundRedirects(HTTPRedirectHandler):
+    """urllib copies Authorization onto a redirect to any host, so a redirected API read would hand the token away."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is not None and urlsplit(newurl).netloc != urlsplit(req.full_url).netloc:
+            redirected.remove_header("Authorization")
+        return redirected
+
+
+PUBLIC_OPENER = build_opener(CredentialBoundRedirects)
+
+
+def read_public(url, limit, token=None):
+    """A GET of a public GitHub URL, authenticated with a read-only token when one is given and anonymous otherwise.
+
+    The Windows staging step passes the job's own read-only GITHUB_TOKEN. Anonymous API calls share GitHub's limit of 60 an
+    hour per address on shared runners, which failed release builds at random. The token goes only to api.github.com URLs
+    and never across a redirect to another host, never to a download address. It cannot write to the destination. A local
+    run has no token and reads anonymously.
+    """
+    api = url.startswith("https://api.github.com/")
+    headers = {"Accept": "application/vnd.github+json" if api else "application/octet-stream", "User-Agent": "companion-builder"}
+    if api and token:
+        headers["Authorization"] = f"Bearer {token}"
+    with PUBLIC_OPENER.open(Request(url, headers=headers), timeout=60) as response:
         body = response.read(limit + 1)
     if len(body) > limit:
         raise ValueError("Public release metadata is larger than the builder accepts")
