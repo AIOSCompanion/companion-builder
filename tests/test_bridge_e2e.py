@@ -18,9 +18,11 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 import bridge_e2e  # noqa: E402
-from bridge_e2e import (BRIDGE_UNINSTALL_GUID, IMPORT_FINISHED, check_feed_served, check_import_pending,  # noqa: E402
-                        check_old_app_gone, check_old_data_detected, check_stable_install, check_uninstall,
-                        check_update_path, point_feed_at, seed_old_data, seed_paths)
+from bridge_e2e import (BRIDGE_UNINSTALL_GUID, IMPORT_FINISHED, PROGRAM, Run, check_feed_served,  # noqa: E402
+                        check_go_app, check_import_pending, check_old_app_gone, check_old_data_detected,
+                        check_stable_install, check_uninstall, check_update_path, point_feed_at, read_receipt,
+                        seed_old_data, seed_paths, serve_feed, takeover_exit_line)
+import urllib.request  # noqa: E402
 
 VERSION = "0.19.5"
 INSTALLER = "Companion-Setup-x64-0.19.5.exe"
@@ -236,6 +238,128 @@ class WorkflowTests(unittest.TestCase):
         text = (ROOT / ".github/workflows/bridge-release.yml").read_text(encoding="utf-8")
         for forbidden in ("release edit", "--draft=false", "--latest", "--prerelease=false", "release publish"):
             self.assertNotIn(forbidden, text)
+
+
+INSTALLER = "Companion-Setup-x64-0.19.5.exe"
+TAKEOVER_FAILED = ('start: args=["--updated" "--force-run"]\n'
+                   'install version 0.19.5 into C:\\Users\\u\\AppData\\Local\\Programs\\Companion\n'
+                   'exit 4: The install failed: rename C:\\Users\\u\\AppData\\Local\\Programs\\Companion.takeover-staging -> '
+                   'C:\\Users\\u\\AppData\\Local\\Programs\\Companion: Access is denied. The previous Companion app was put back.\n')
+
+
+class FeedRequestTests(unittest.TestCase):
+    """The incident: electron-updater fetched /latest.yml?noCache=... and the check, which compared the raw request line,
+    reported that the feed was never fetched while the bridge had run from it. These use a real socket, as the runner does."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.folder = Path(self.tmp.name)
+        (self.folder / "latest.yml").write_text("version: 0.19.5\n", encoding="utf-8")
+        (self.folder / INSTALLER).write_bytes(b"installer-bytes")
+        self.server, self.base, self.records = serve_feed(self.folder)
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.tmp.cleanup()
+
+    def test_an_electron_style_cache_busting_fetch_of_latest_yml_counts_as_served(self):
+        urllib.request.urlopen(f"{self.base}/latest.yml?noCache=1k2j3x").read()
+        urllib.request.urlopen(f"{self.base}/{INSTALLER}").read()
+        self.assertIn(("/latest.yml?noCache=1k2j3x", "200"), self.records)
+        ok, detail = check_feed_served(self.records, INSTALLER)
+        self.assertTrue(ok, detail)
+
+    def test_the_raw_request_line_comparison_that_missed_it_is_refused_by_the_fixed_check(self):
+        # The old comparison, kept here as the mutant: it must not pass the same traffic.
+        def raw_compare(records, installer_name):
+            latest = any(path.endswith("/latest.yml") and code == "200" for path, code in records)
+            return latest
+        urllib.request.urlopen(f"{self.base}/latest.yml?noCache=1k2j3x").read()
+        urllib.request.urlopen(f"{self.base}/{INSTALLER}").read()
+        self.assertFalse(raw_compare(self.records, INSTALLER))
+        self.assertTrue(check_feed_served(self.records, INSTALLER)[0])
+
+    def test_a_fetch_of_another_file_does_not_count_as_latest_yml(self):
+        urllib.request.urlopen(f"{self.base}/{INSTALLER}").read()
+        self.assertFalse(check_feed_served(self.records, INSTALLER)[0])
+
+
+class GoAppIdentityTests(unittest.TestCase):
+    STABLE = Path("/tmp/Programs/Companion")
+    GOOD_SHA = "ab" * 32
+    RECEIPT = {"schema": 1, "version": VERSION, "files": {PROGRAM: "ab" * 32, "companion-cli.exe": "cd" * 32}}
+
+    def check(self, **overrides):
+        args = dict(stable=self.STABLE, version=VERSION, alive=True, image=str(self.STABLE / PROGRAM),
+                    image_sha256=self.GOOD_SHA, receipt=self.RECEIPT, home_created=True)
+        args.update(overrides)
+        return check_go_app(**args)
+
+    def test_the_stable_program_at_the_bridge_version_with_matching_bytes_passes(self):
+        ok, detail = self.check()
+        self.assertTrue(ok, detail)
+
+    def test_a_process_not_started_by_this_run_fails(self):
+        self.assertFalse(self.check(alive=False)[0])
+
+    def test_a_process_from_another_program_path_fails_even_at_the_stable_name(self):
+        self.assertFalse(self.check(image="/tmp/old/Companion.exe")[0])
+
+    def test_a_rolled_back_program_fails_when_no_receipt_names_the_bridge(self):
+        ok, detail = self.check(receipt=None)
+        self.assertFalse(ok)
+        self.assertIn("no install receipt", detail)
+
+    def test_an_older_version_in_the_receipt_fails(self):
+        self.assertFalse(self.check(receipt={**self.RECEIPT, "version": "0.18.0"})[0])
+
+    def test_a_program_whose_bytes_are_not_the_receipts_fails(self):
+        self.assertFalse(self.check(image_sha256="ee" * 32)[0])
+        self.assertFalse(self.check(image_sha256=None)[0])
+
+    def test_a_missing_home_folder_fails(self):
+        self.assertFalse(self.check(home_created=False)[0])
+
+    def test_the_program_path_must_be_read(self):
+        self.assertFalse(self.check(image=None)[0])
+
+
+class TakeoverExitLineTests(unittest.TestCase):
+    def test_the_last_exit_line_is_the_takeover_own_words(self):
+        self.assertEqual(takeover_exit_line(TAKEOVER_FAILED).split(":")[0], "exit 4")
+        self.assertTrue(takeover_exit_line(TAKEOVER_FAILED).startswith("exit 4: The install failed"))
+
+    def test_a_log_without_an_exit_line_gives_nothing(self):
+        self.assertEqual(takeover_exit_line('start: args=["--updated"]\ninstall complete\n'), "")
+
+    def test_a_failed_takeover_leads_the_result_with_its_exit_line(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Run(Path(tmp))
+            run.takeover_line = takeover_exit_line(TAKEOVER_FAILED)
+            run.check("bridge_ran_from_old_updater", False, "the bridge log has no 'install complete'")
+            run.check("go_app_launches", False, "the running process is old")
+            run.write_result()
+            document = json.loads((Path(tmp) / "e2e-result.json").read_text(encoding="utf-8"))
+            self.assertEqual(list(document)[0], "summary")
+            self.assertEqual(document["summary"], run.takeover_line)
+            self.assertEqual(document["takeover_exit"], run.takeover_line)
+            self.assertFalse(document["passed"])
+            self.assertEqual((Path(tmp) / "e2e-summary.txt").read_text(encoding="utf-8").strip(), run.takeover_line)
+
+    def test_without_a_takeover_failure_the_first_failing_check_leads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Run(Path(tmp))
+            run.check("stable_path_has_go_version", False, "receipt version '0.18.0', expected '0.19.5'")
+            self.assertTrue(run.summary().startswith("First failing check: stable_path_has_go_version"))
+
+    def test_a_receipt_that_does_not_read_is_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(read_receipt(Path(tmp)))
+            (Path(tmp) / "companion-install.json").write_text("not json", encoding="utf-8")
+            self.assertIsNone(read_receipt(Path(tmp)))
+            (Path(tmp) / "companion-install.json").write_text('{"version": "0.19.5", "files": {}}', encoding="utf-8")
+            self.assertEqual(read_receipt(Path(tmp))["version"], "0.19.5")
 
 
 if __name__ == "__main__":
