@@ -39,6 +39,7 @@ import threading
 import time
 import urllib.request
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import bridge_release  # noqa: E402  (same folder: the bridge's own output checks)
@@ -89,6 +90,8 @@ class Run:
         self.out.mkdir(parents=True, exist_ok=True)
         self.log_path = self.out / "e2e-log.txt"
         self.checks: list[dict] = []
+        # The takeover's own last 'exit N' line, set when the takeover did not finish cleanly. It leads the summary.
+        self.takeover_line = ""
 
     def log(self, message: str) -> None:
         line = f"{time.strftime('%H:%M:%S')} {message}"
@@ -103,9 +106,21 @@ class Run:
     def passed(self) -> bool:
         return bool(self.checks) and all(item["ok"] for item in self.checks)
 
+    def summary(self) -> str:
+        """What the report leads with: the takeover's own exit line when the takeover failed, else the first failing check."""
+        if self.takeover_line:
+            return self.takeover_line
+        failed = [item for item in self.checks if not item["ok"]]
+        if failed:
+            return f"First failing check: {failed[0]['name']} - {failed[0]['detail']}"
+        return "All checks passed." if self.passed() else "No checks ran."
+
     def write_result(self) -> None:
-        document = {"passed": self.passed(), "checks": self.checks}
+        summary = self.summary()
+        document = {"summary": summary, "takeover_exit": self.takeover_line, "passed": self.passed(), "checks": self.checks}
         (self.out / "e2e-result.json").write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+        (self.out / "e2e-summary.txt").write_text(summary + "\n", encoding="utf-8")
+        self.log(f"SUMMARY {summary}")
 
 
 # ---- Pure parts (tested on any host) -------------------------------------------------------------------------------------
@@ -210,8 +225,12 @@ def check_update_path(takeover_text: str) -> tuple[bool, str]:
 
 
 def check_feed_served(records: list[tuple[str, str]], installer_name: str) -> tuple[bool, str]:
-    latest = any(path.endswith("/latest.yml") and code == "200" for path, code in records)
-    installer = any(path.endswith("/" + installer_name) and code in ("200", "206") for path, code in records)
+    """The feed's own request log. The path is compared without its query: electron-updater asks for latest.yml as
+    /latest.yml?noCache=<random> (electron-updater util.js newUrlFromBase, with isAddNoCacheQuery on by default), so comparing
+    the raw request line missed every real fetch of the feed."""
+    paths = [(urlsplit(path).path, str(code)) for path, code in records]
+    latest = any(path == "/latest.yml" and code == "200" for path, code in paths)
+    installer = any(path == "/" + installer_name and code in ("200", "206") for path, code in paths)
     if not latest:
         return False, "the previous app never fetched latest.yml from the local feed"
     if not installer:
@@ -250,6 +269,47 @@ def check_import_pending(engine_home: Path, launched_at: float, previous_record:
 
 def check_cdp_driver_result(returncode: int) -> tuple[bool, str]:
     return returncode == 0, "Restart Now was clicked" if returncode == 0 else f"the update driver exited {returncode}"
+
+
+def takeover_exit_line(text: str) -> str:
+    """The takeover's last 'exit N' line, exactly as its log wrote it; '' when the log has none."""
+    lines = [line.strip() for line in text.splitlines() if re.search(r"\bexit \d+\b", line)]
+    return lines[-1] if lines else ""
+
+
+def read_receipt(stable: Path) -> dict | None:
+    """The install receipt beside the stable program, or None when it is absent or does not read."""
+    path = Path(stable) / RECEIPT
+    if not path.is_file():
+        return None
+    try:
+        receipt = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return None
+    return receipt if isinstance(receipt, dict) else None
+
+
+def check_go_app(stable: Path, version: str, alive: bool, image: str | None, image_sha256: str | None,
+                 receipt: dict | None, home_created: bool) -> tuple[bool, str]:
+    """The process this run started is the Go app at the stable path, at the bridge version. Its image path must be the stable
+    program, its bytes must be the ones the bridge version's install receipt records, and the receipt must name that version.
+    A process from the old program files (a rolled-back takeover) fails here, although it runs from the same path."""
+    if not alive:
+        return False, "the process this run started is not running"
+    if not image:
+        return False, "the running process's program path could not be read"
+    if _norm(image) != _norm(Path(stable) / PROGRAM):
+        return False, f"the running process is {image}, not the stable program"
+    if receipt is None:
+        return False, "no install receipt at the stable path, so the program cannot be tied to a version"
+    if receipt.get("version") != version:
+        return False, f"install receipt names {receipt.get('version')!r}, expected {version!r}"
+    recorded = (receipt.get("files") or {}).get(PROGRAM)
+    if not image_sha256 or recorded != image_sha256:
+        return False, "the running program does not match the bridge's install receipt"
+    if not home_created:
+        return False, "the Go app's home folder was not created"
+    return True, f"the running {PROGRAM} is the stable program at {version} (its bytes match the install receipt)"
 
 
 def read_logs_text(engine_home: Path, limit: int = 20 * 1024 * 1024) -> str:
@@ -315,7 +375,7 @@ class _FeedHandler(SimpleHTTPRequestHandler):
         return
 
     def log_request(self, code="-", size="-"):
-        self.records.append((self.path, str(code)))
+        self.records.append((self.path, str(int(code)) if isinstance(code, int) else str(code)))
 
 
 def serve_feed(directory: Path):
@@ -397,6 +457,37 @@ def capture(out: Path, name: str, script: Path, run: Run) -> None:
         run.log(f"screenshot {name} was not taken (exit {result.returncode})")
     else:
         run.log(f"screenshot {name} taken")
+
+
+def process_image(pid: int) -> str | None:
+    """The full program path of a running process (QueryFullProcessImageNameW), or None when it cannot be read."""
+    import ctypes
+    from ctypes import wintypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return None
+    try:
+        size = wintypes.DWORD(32768)
+        buffer = ctypes.create_unicode_buffer(size.value)
+        if not kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
+            return None
+        return buffer.value
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def sha256_file(path: Path | None) -> str | None:
+    if path is None or not Path(path).is_file():
+        return None
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def stop(proc: subprocess.Popen | None) -> None:
@@ -484,6 +575,8 @@ def main(argv=None) -> int:
         (args.out / "takeover-run.txt").write_text(takeover_text, encoding="utf-8")
         ok, detail = check_update_path(takeover_text)
         run.check("bridge_ran_from_old_updater", ok, detail)
+        if not ok:
+            run.takeover_line = takeover_exit_line(takeover_text) or "the takeover log has no exit line"
         ok, detail = check_feed_served(records, installer_name)
         run.check("feed_served_the_bridge", ok, detail)
 
@@ -491,9 +584,11 @@ def main(argv=None) -> int:
         new_proc = subprocess.Popen([str(stable / PROGRAM)], cwd=str(stable))
         procs.append(new_proc)
         time.sleep(NEW_APP_SECONDS)
-        run.check("go_app_launches", new_proc.poll() is None and engine_home.is_dir(),
-                  "the Go app is still running after 60 seconds and its home exists" if new_proc.poll() is None
-                  else f"the Go app exited with {new_proc.returncode}")
+        alive = new_proc.poll() is None
+        image = process_image(new_proc.pid) if alive else None
+        ok, detail = check_go_app(stable, version, alive, image, sha256_file(Path(image)) if image else None,
+                                  read_receipt(stable), engine_home.is_dir())
+        run.check("go_app_launches", ok, detail)
         capture(args.out, "02-go-app-after-update", script, run)
 
         cli_output = None
