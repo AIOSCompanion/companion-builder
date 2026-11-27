@@ -1,0 +1,247 @@
+name: Deploy the auth portal from the public builder
+
+# The builder-side route for AIOSCompanion/AIOS_Commercial/.github/workflows/deploy-portal.yml, used while
+# that repository's Actions are off. It builds, tests, gates and deploys the portal at one exact commit,
+# with the same steps and the same bundle gates. Dispatch only, from this repository's main branch.
+#
+#   mode: preview  publishes a preview channel (7 days). The live site is not touched.
+#   mode: live     publishes Firebase Hosting site auth-portal (app.aioscompanion.com).
+#
+# Both modes need the portal-deploy approval (the environment requires a reviewer for every run).
+# The private read token travels from the source job as a masked job output, is read-only, scoped
+# to AIOS_Commercial, expires within an hour, and is never written to a file or an artifact.
+
+on:
+  workflow_dispatch:
+    inputs:
+      aios_commercial_sha:
+        description: Exact 40-character AIOS_Commercial commit to build and deploy (lowercase hex)
+        required: true
+        type: string
+      mode:
+        description: "preview = temporary URL, live site untouched; live = publish to app.aioscompanion.com"
+        required: true
+        default: preview
+        type: choice
+        options: [preview, live]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: portal-deploy
+  cancel-in-progress: false
+
+jobs:
+  source:
+    name: Mint the read token for the approved commit
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: source-access
+    timeout-minutes: 10
+    outputs:
+      token: ${{ steps.source-token.outputs.token }}
+    steps:
+      - name: Require the trusted builder main branch and an exact commit
+        env:
+          PORTAL_SHA: ${{ inputs.aios_commercial_sha }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/heads/main"
+          if [[ ! "$PORTAL_SHA" =~ ^[a-f0-9]{40}$ ]]; then
+            echo "::error::aios_commercial_sha must be an exact 40-character lowercase commit SHA" >&2
+            exit 1
+          fi
+
+      - name: Create a read-only App token for AIOS_Commercial
+        id: source-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510
+        with:
+          app-id: ${{ vars.BUILDER_APP_ID }}
+          private-key: ${{ secrets.BUILDER_APP_PRIVATE_KEY }}
+          owner: AIOSCompanion
+          repositories: AIOS_Commercial
+          permission-contents: read
+
+      - name: Confirm the commit exists in AIOS_Commercial
+        env:
+          GH_TOKEN: ${{ steps.source-token.outputs.token }}
+          PORTAL_SHA: ${{ inputs.aios_commercial_sha }}
+        run: |
+          set -euo pipefail
+          found="$(gh api "repos/AIOSCompanion/AIOS_Commercial/commits/${PORTAL_SHA}" --jq '.sha')"
+          test "$found" = "$PORTAL_SHA"
+          echo "AIOS_Commercial commit ${PORTAL_SHA} exists; the deploy job checks it out next"
+
+  deploy:
+    name: Build, gate and deploy the portal (${{ inputs.mode }})
+    if: github.ref == 'refs/heads/main'
+    needs: source
+    runs-on: ubuntu-latest
+    environment: portal-deploy
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write   # keyless Workload Identity Federation to Firebase, as in deploy-portal.yml
+    env:
+      PORTAL_SHA: ${{ inputs.aios_commercial_sha }}
+    steps:
+      - name: Require the trusted builder main branch
+        run: test "$GITHUB_REF" = "refs/heads/main"
+
+      - name: Check out AIOS_Commercial at the approved commit
+        uses: actions/checkout@v4
+        with:
+          repository: AIOSCompanion/AIOS_Commercial
+          ref: ${{ inputs.aios_commercial_sha }}
+          token: ${{ needs.source.outputs.token }}
+          path: portal-src
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Confirm the checkout is exactly the approved commit
+        run: |
+          set -euo pipefail
+          test "$(git -C portal-src rev-parse HEAD)" = "$PORTAL_SHA"
+          echo "checked out AIOS_Commercial ${PORTAL_SHA}"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Same as deploy-portal.yml: the portal imports the sibling package from its dist/, which is
+      # gitignored, so it is built explicitly rather than through an implicit prepare hook.
+      - name: Build and test the shared integration package
+        working-directory: portal-src/@aios-commercial-integration
+        run: |
+          npm ci
+          npm test
+          test -f dist/index.js || { echo "::error::the shared package did not produce dist/index.js"; exit 1; }
+
+      - name: Build the portal
+        working-directory: portal-src/aios-auth-portal
+        run: |
+          npm ci
+          npm run build
+
+      - name: Test the portal
+        working-directory: portal-src/aios-auth-portal
+        run: npm test
+
+      # Everything below runs BEFORE anything is published. The assertions are the same as
+      # deploy-portal.yml's gate, which pins the shipped entry bundle's Firebase config, the
+      # functionsUrl, the https relay URL and the phone app's static files.
+      - name: Gate the bundle
+        working-directory: portal-src/aios-auth-portal
+        run: |
+          set -e
+          fail() { echo "::error::$1"; exit 1; }
+          ENTRY="$( (grep -oE '<script type="module"[^>]* src="/assets/[A-Za-z0-9_.-]+[.]js"' dist/index.html || true) \
+                   | grep -oE '/assets/[A-Za-z0-9_.-]+[.]js' | head -1 || true)"
+          [ -n "$ENTRY" ] || fail "dist/index.html loads no module script"
+          BUNDLE="dist${ENTRY}"
+          [ -f "$BUNDLE" ] || fail "the entry bundle ${BUNDLE} was not built"
+          echo "gating ${BUNDLE}"
+
+          grep -qE 'apiKey:"AIza[A-Za-z0-9_-]{30,}"' "$BUNDLE" \
+            || fail "the Firebase apiKey is missing or empty in the built bundle"
+          grep -qE 'appId:"1:[0-9]+:web:[a-f0-9]+"' "$BUNDLE" \
+            || fail "the Firebase appId is missing or empty in the built bundle"
+
+          grep -q 'functionsUrl:"https://us-central1-aios-ce15f.cloudfunctions.net"' "$BUNDLE" \
+            || fail "functionsUrl is unset — this breaks sign-in from the desktop app"
+
+          grep -q 'https://34-51-149-24\.sslip\.io' "$BUNDLE" \
+            || fail "the https relay URL is not in the bundle — the Devices page cannot work"
+          if grep -qE 'http://34\.51\.149\.24' "$BUNDLE"; then
+            fail "the bundle contains the plain-http relay URL; a browser will block it"
+          fi
+
+          node -e '
+            const m = JSON.parse(require("fs").readFileSync("dist/companion.webmanifest", "utf8"));
+            if (m.id !== "/companion" || m.start_url !== "/companion") process.exit(1);
+          ' || fail "dist/companion.webmanifest is missing or is not the phone app manifest"
+          grep -q 'companion-wake' dist/companion-phone-sw.js \
+            || fail "dist/companion-phone-sw.js is missing or is not the phone notification worker"
+          echo "all gates passed"
+
+      - name: Authenticate to Firebase (keyless)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/167541691556/locations/global/workloadIdentityPools/github-actions/providers/aios-commercial
+          service_account: portal-hosting-deploy@aios-ce15f.iam.gserviceaccount.com
+
+      - name: Deploy to a preview channel
+        if: inputs.mode == 'preview'
+        working-directory: portal-src/aios-auth-portal
+        run: |
+          set -o pipefail
+          npx --yes firebase-tools@13 hosting:channel:deploy "ci-${PORTAL_SHA::7}" \
+            --only auth-portal --expires 7d --project aios-ce15f 2>&1 | tee out.txt
+          URL="$(grep -oE 'https://[a-z0-9-]+--[a-z0-9-]+\.web\.app' out.txt | head -1)"
+          echo "preview: ${URL}"
+          echo "### Preview: ${URL}" >> "$GITHUB_STEP_SUMMARY"
+          echo "PREVIEW_URL=${URL}" >> "$GITHUB_ENV"
+
+      - name: Verify the preview on real HTTPS
+        if: inputs.mode == 'preview'
+        working-directory: portal-src/aios-auth-portal
+        run: |
+          test -n "${PREVIEW_URL}" || { echo "::error::the preview deploy printed no URL"; exit 1; }
+          ready=""
+          for attempt in $(seq 1 10); do
+            page="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "${PREVIEW_URL}/devices" || true)"
+            manifest="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "${PREVIEW_URL}/companion.webmanifest" || true)"
+            worker="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "${PREVIEW_URL}/companion-phone-sw.js" || true)"
+            echo "preview attempt ${attempt}: /devices=${page:-none}, manifest=${manifest:-none}, worker=${worker:-none}"
+            if [ "$page" = "200" ] && [ "$manifest" = "200" ] && [ "$worker" = "200" ]; then
+              ready=1
+              break
+            fi
+            sleep 6
+          done
+          [ -n "$ready" ] || { echo "::error::the preview did not serve its page and static files after propagation"; exit 1; }
+          bash scripts/verify-phone-static.sh "${PREVIEW_URL}"
+
+      - name: Publish to app.aioscompanion.com
+        if: inputs.mode == 'live'
+        working-directory: portal-src/aios-auth-portal
+        run: |
+          npx --yes firebase-tools@13 deploy --only hosting:auth-portal \
+            --project aios-ce15f --non-interactive \
+            --message "CI ${PORTAL_SHA::7}"
+
+      - name: Verify the live site
+        if: inputs.mode == 'live'
+        working-directory: portal-src/aios-auth-portal
+        run: |
+          set -e
+          for i in $(seq 1 10); do
+            ASSET="$(curl -s --max-time 30 https://app.aioscompanion.com/ \
+                     | grep -oE '/assets/index-[A-Za-z0-9_-]+\.js' | head -1)"
+            [ -n "$ASSET" ] && break
+            echo "attempt $i: no asset yet"; sleep 6
+          done
+          [ -n "$ASSET" ] || { echo "::error::app.aioscompanion.com served no bundle"; exit 1; }
+          echo "live bundle: ${ASSET}"
+          curl -s --max-time 60 "https://app.aioscompanion.com${ASSET}" > live.js
+          echo "bytes: $(wc -c < live.js)"
+
+          grep -qE 'apiKey:"AIza[A-Za-z0-9_-]{30,}"' live.js \
+            || { echo "::error::the LIVE bundle has no Firebase apiKey — sign-in is broken"; exit 1; }
+          grep -q 'https://34-51-149-24\.sslip\.io' live.js \
+            || { echo "::error::the LIVE bundle does not carry the https relay URL"; exit 1; }
+          echo "live bundle carries the Firebase config and the https relay"
+
+          code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 \
+                  https://34-51-149-24.sslip.io/sync/v1/devices || true)"
+          echo "relay /sync/v1/devices over TLS -> ${code:-unreachable}"
+          [ "$code" = "401" ] || { echo "::error::the relay did not answer over TLS"; exit 1; }
+
+          ok=""
+          for i in 1 2 3 4 5; do
+            if bash scripts/verify-phone-static.sh https://app.aioscompanion.com; then ok=1; break; fi
+            echo "attempt $i: the phone app's files are not live yet"; sleep 6
+          done
+          [ -n "$ok" ] || { echo "::error::app.aioscompanion.com does not serve the phone app's files"; exit 1; }
+          echo "### Live: https://app.aioscompanion.com (${ASSET}, AIOS_Commercial ${PORTAL_SHA::7})" >> "$GITHUB_STEP_SUMMARY"
