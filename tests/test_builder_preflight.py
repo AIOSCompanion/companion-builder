@@ -144,12 +144,14 @@ class BuilderTests(unittest.TestCase):
             for name, job in yaml.safe_load(path.read_text())["jobs"].items():
                 if "BUILDER_APP_PRIVATE_KEY" in str(job):
                     consumers.append((path.name, name))
-                    self.assertIn(job.get("environment"), ("source-access", "release-signing"),
+                    self.assertIn(job.get("environment"), configure.APP_KEY_ENVIRONMENTS,
                                   f"{path.name}/{name} exposes private-source access without its approval gate")
         self.assertIn(("release.yml", "identity"), consumers)
         self.assertIn(("test.yml", "suite"), consumers)
         self.assertIn(("test.yml", "status"), consumers)
         self.assertIn(("catch-up.yml", "expand"), consumers)
+        self.assertIn(("relay-deploy.yml", "deploy"), consumers)
+        self.assertIn(("portal-deploy.yml", "deploy"), consumers)
         bridge = (ROOT / ".github/workflows/bridge-deploy.yml").read_text()
         self.assertNotIn("secrets.BUILDER_APP_PRIVATE_KEY", bridge)
         self.assertIn("secrets.BRIDGE_APP_PRIVATE_KEY", bridge)
@@ -166,7 +168,7 @@ class BuilderTests(unittest.TestCase):
             return subprocess.CompletedProcess(args, 0)
         configure.set_app_key("synthetic-value", run=run)
         self.assertEqual({args[args.index("--env") + 1] for args, _ in calls},
-                         {"source-access", "release-signing"})
+                         {"source-access", "release-signing", "relay-deploy", "portal-deploy"})
         self.assertTrue(all(kwargs["input"] == "synthetic-value" for _, kwargs in calls))
 
     def test_release_pins_come_from_the_selected_release_and_conflicts_fail_closed(self):

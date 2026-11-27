@@ -43,23 +43,22 @@ class RelayDeployWorkflowTests(unittest.TestCase):
         for name, job in self.jobs.items():
             self.assertEqual(job.get('if'), MAIN_ONLY, name)
 
-    def test_private_token_is_minted_only_in_source_access(self):
-        source_job = self.jobs['source']
-        self.assertEqual(source_job['environment'], 'source-access')
-        self.assertNotIn('id-token', source_job.get('permissions', {'contents': 'read'}))
-        minting = [s for s in source_job['steps'] if 'create-github-app-token' in s.get('uses', '')]
+    def test_one_protected_job_mints_the_token_and_holds_the_deploy_identity(self):
+        # GitHub drops a job output that holds a secret, so the read token is minted in the job that uses it.
+        self.assertEqual(set(self.jobs), {'deploy'})
+        deploy = self.jobs['deploy']
+        self.assertEqual(deploy['environment'], 'relay-deploy')
+        self.assertNotIn('needs', deploy)
+        self.assertNotIn('outputs', deploy)
+        self.assertEqual(deploy['permissions'], {'contents': 'read', 'id-token': 'write'})
+        minting = [s for s in deploy['steps'] if 'create-github-app-token' in s.get('uses', '')]
         self.assertEqual(len(minting), 1)
         self.assertEqual(minting[0]['with']['repositories'], 'aiosxaegra')
         self.assertEqual(minting[0]['with']['permission-contents'], 'read')
-
-    def test_deploy_identity_is_only_in_the_relay_deploy_environment(self):
-        deploy = self.jobs['deploy']
-        self.assertEqual(deploy['environment'], 'relay-deploy')
-        self.assertEqual(deploy['needs'], 'source')
-        self.assertEqual(deploy['permissions'], {'contents': 'read', 'id-token': 'write'})
-        for name, job in self.jobs.items():
-            if name != 'deploy':
-                self.assertNotIn('id-token', job.get('permissions', {}), name)
+        names = [s.get('name', '') for s in deploy['steps']]
+        self.assertLess(names.index('Create a read-only App token for aiosxaegra'),
+                        names.index('Check out aiosxaegra at the approved commit'))
+        self.assertNotIn('needs.source', self.source)
 
     def test_deploy_target_matches_the_relay_own_deploy(self):
         steps = self.jobs['deploy']['steps']
@@ -102,11 +101,18 @@ class PortalDeployWorkflowTests(unittest.TestCase):
         for name, job in self.jobs.items():
             self.assertEqual(job.get('if'), MAIN_ONLY, name)
 
-    def test_source_token_and_deploy_identity_are_separated(self):
-        self.assertEqual(self.jobs['source']['environment'], 'source-access')
-        self.assertEqual(self.jobs['deploy']['environment'], 'portal-deploy')
-        self.assertNotIn('id-token', self.jobs['source'].get('permissions', {}))
-        self.assertEqual(self.jobs['deploy']['permissions'], {'contents': 'read', 'id-token': 'write'})
+    def test_one_protected_job_mints_the_token_and_holds_the_deploy_identity(self):
+        self.assertEqual(set(self.jobs), {'deploy'})
+        deploy = self.jobs['deploy']
+        self.assertEqual(deploy['environment'], 'portal-deploy')
+        self.assertNotIn('needs', deploy)
+        self.assertNotIn('outputs', deploy)
+        self.assertEqual(deploy['permissions'], {'contents': 'read', 'id-token': 'write'})
+        minting = [s for s in deploy['steps'] if 'create-github-app-token' in s.get('uses', '')]
+        self.assertEqual(len(minting), 1)
+        self.assertEqual(minting[0]['with']['repositories'], 'AIOS_Commercial')
+        self.assertEqual(minting[0]['with']['permission-contents'], 'read')
+        self.assertNotIn('needs.source', self.source)
 
     def test_live_publish_and_verify_run_only_in_live_mode(self):
         steps = {s.get('name'): s for s in self.jobs['deploy']['steps']}
