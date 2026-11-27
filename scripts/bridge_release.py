@@ -27,10 +27,12 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from app_release_publish import api, releases_for, single_draft
-from app_release_artifacts import digest, version as tag_version
+from app_release_artifacts import RECEIPTS, digest, version as tag_version
 
 BRIDGE_DESTINATION = "AIOSCompanion/aios-companion-releases"
-GO_ASSETS = ("Companion_{v}_windows_amd64.zip", "companion-release-windows-amd64.json", "SHA256SUMS-windows-amd64.txt")
+GO_PLATFORM = "windows-amd64"
+GO_ARCHIVE = "Companion_{v}_windows_amd64.zip"
+GO_CHECKSUMS = "SHA256SUMS-windows-amd64.txt"
 BRIDGE_ASSETS = ("Companion-Setup-x64-{v}.exe", "Companion-Setup-x64-{v}.exe.blockmap", "latest.yml")
 VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 REPOSITORY = re.compile(r"AIOSCompanion/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}")
@@ -60,8 +62,33 @@ def _raw_download(repository, asset_id, path):
         raise RuntimeError(f"asset download failed with exit {result.returncode}")
 
 
+def receipt_candidates():
+    """The Windows receipt names, highest generation first. A release publishes one per generation. The bridge takes the first
+    of these that names the release it is built from (select_receipt), so a newer release's older-generation copy never wins."""
+    return [RECEIPTS[GO_PLATFORM][generation] for generation in sorted(RECEIPTS[GO_PLATFORM], reverse=True)]
+
+
+def select_receipt(folder, tag):
+    """The receipt in folder that names this release by its tag and version, checked from the highest generation down. A receipt
+    that does not read is refused, and a release that no receipt names is refused. Receipts of other releases never match."""
+    value = bridge_version(tag)
+    for name in receipt_candidates():
+        path = Path(folder) / name
+        if not path.is_file():
+            continue
+        try:
+            receipt = json.loads(path.read_text(encoding="utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            raise ValueError(f"{name} is not a readable receipt") from None
+        if isinstance(receipt, dict) and receipt.get("tag") == "v" + value and receipt.get("version") == value:
+            return name
+    raise ValueError(f"No Go release receipt names {tag}")
+
+
 def fetch(tag, repository, out, request=api, download=_raw_download):
-    """Downloads the Go release's three Windows files and checks them against its checksum list and asset digests."""
+    """Downloads the Go release's Windows archive, its checksum list and every receipt it publishes, and checks each against
+    GitHub's digest. The archive is checked against the checksum list. Returns [archive, the receipt that names this release,
+    checksum list]; a release that no receipt names is refused."""
     value = bridge_version(tag)
     if not REPOSITORY.fullmatch(repository or ""):
         raise ValueError("The Go release repository is not configured")
@@ -71,21 +98,23 @@ def fetch(tag, repository, out, request=api, download=_raw_download):
     out.mkdir(parents=True, exist_ok=True)
     release = single_draft_or_published(repository, tag, request)
     assets = {item.get("name"): item for item in release.get("assets", []) if isinstance(item, dict)}
-    names = expected_names(value, GO_ASSETS)
-    for name in names:
+    archive, checksums = expected_names(value, (GO_ARCHIVE, GO_CHECKSUMS))
+    for name in (archive, checksums):
         if name not in assets:
             raise ValueError(f"The Go release has no {name}")
+    receipts = [name for name in receipt_candidates() if name in assets]
+    for name in [archive, checksums, *receipts]:
         download(repository, assets[name]["id"], out / name)
         if assets[name].get("digest") != "sha256:" + digest(out / name):
             raise ValueError(f"{name} does not match the digest GitHub recorded for it")
     listed = {}
-    for line in (out / names[2]).read_text(encoding="utf-8-sig").splitlines():
+    for line in (out / checksums).read_text(encoding="utf-8-sig").splitlines():
         match = re.fullmatch(r"([a-fA-F0-9]{64}) [ *]([^/\\]+)", line)
         if match:
             listed[match[2]] = match[1].lower()
-    if listed.get(names[0]) != digest(out / names[0]):
+    if listed.get(archive) != digest(out / archive):
         raise ValueError("The archive does not match the Go release's checksum list")
-    return names
+    return [archive, select_receipt(out, tag), checksums]
 
 
 def single_draft_or_published(repository, tag, request):
@@ -163,7 +192,8 @@ def build(env, run=subprocess.run):
         raise ValueError("The build must not hold a credential")
     source, _, _ = source_identity(env)
     inp = Path(env["BRIDGE_INPUT_DIR"]).resolve(strict=True)
-    names = expected_names(value, GO_ASSETS)
+    archive = expected_names(value, (GO_ARCHIVE,))[0]
+    receipt = select_receipt(inp, tag)
     out = Path(env["BRIDGE_OUT_DIR"])
     if out.exists() and any(out.iterdir()):
         raise ValueError("The bridge output folder must be empty")
@@ -172,7 +202,7 @@ def build(env, run=subprocess.run):
     if script.is_symlink() or not script.is_file():
         raise ValueError("The reviewed bridge script is missing")
     args = ["pwsh", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script),
-            "-Version", value, "-Archive", str(inp / names[0]), "-Receipt", str(inp / names[1]), "-OutDir", str(out.resolve())]
+            "-Version", value, "-Archive", str(inp / archive), "-Receipt", str(inp / receipt), "-OutDir", str(out.resolve())]
     result = run(args, cwd=source, env=_child_env(env), check=False)
     if result.returncode:
         raise RuntimeError(f"package-bridge.ps1 failed with exit {result.returncode}")
