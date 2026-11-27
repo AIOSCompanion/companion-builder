@@ -101,11 +101,12 @@ Timeouts remain failures; diagnostic runs do not bypass the test or release gate
   the `source-access` approval (read token) and the `relay-deploy` approval (deploy identity). It delivers no
   dotenv: the VM keeps its serving `.env`. Changes to the production dotenv still go through the relay's own
   `deploy.yml`.
-- `relay-migration-dryrun.yml`: dry-runs one exact `aiosxaegra` commit's alembic migrations on a copy of the
-  production database. The VM copies production into a new `relay_migration_dryrun_<timestamp>` database
-  (`pg_dump` reads production, `pg_restore` writes only the copy), runs `alembic upgrade head` from that commit's
-  image against the copy, re-runs the data rewrite, checks the account rows, and drops the copy on every exit
-  path. Dispatch only, from main, behind the `relay-deploy` approval. It writes nothing to production.
+- `relay-migration-dryrun.yml`: dry-runs one exact `aiosxaegra` commit's alembic migrations on a selective copy of
+  the production database. The VM copies the whole schema, and the data of only the tables that commit's migrations
+  read or write, into a new `relay_migration_dryrun_<timestamp>` database (`pg_dump` reads production, `pg_restore`
+  writes only the copy). It runs `alembic upgrade head` from that commit's image against the copy, re-runs the data
+  rewrite, checks the account rows, and drops the copy on every exit path. Dispatch only, from main, behind the
+  `relay-deploy` approval. It writes nothing to production.
 - `portal-deploy.yml`: builds, tests, gates and deploys one exact `AIOS_Commercial` commit with the steps of its
   `deploy-portal.yml`. `mode: preview` publishes a preview channel; `mode: live` publishes
   `app.aioscompanion.com`. Dispatch only, from main. Both modes need the `source-access` and `portal-deploy`

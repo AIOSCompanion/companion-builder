@@ -10,11 +10,16 @@
 #                login is read in memory from the postgres container's environment and is never printed.
 #   the copy     relay_migration_dryrun_<timestamp>. Every migration statement runs against it. The probe opens it
 #                read-only and refuses any other database.
+#   the copy's   SELECTED, not the whole database. The schema of the whole database is copied (pg_dump -s). Data is
+#   contents     copied only for the tables the approved commit's migrations read or write (derived from its
+#                alembic files, see derive.py), plus the verifier's reads and alembic_version. Tables the migrations
+#                only ALTER are copied as schema only, and their production row count and size are reported.
 #   the work     a root-only directory under ROOT: the source export, the built image and the probe output.
-#   disk         refuses before anything is created, copied or built unless the data volume has at least
-#                2 x the production database size + 3 GiB free (measured in the container and on the VM) and the
-#                Docker root (and /var/lib/docker, where it exists) has at least 6 GiB free. It measures again
-#                after the copy is created and before the restore, and drops the copy if the room has gone.
+#   disk         refuses before anything is copied or built unless the data volume has at least
+#                2 x the selected data size + 3 GiB free (measured in the container and on the VM), the Docker root
+#                (and /var/lib/docker, where it exists) has at least 6 GiB free, and the selection is at most
+#                SELECTED_DATA_CEILING. It measures again after the copy is created and before the restore, and
+#                drops the copy if the room has gone.
 #
 # Every exit path removes the containers it started, drops the copy (a failed drop is a failed run), removes the
 # built image and the work directory. The migrations are the code under test; this program is the trusted harness.
@@ -48,14 +53,26 @@ START_REVISION=w20261031_usage_turn_ts
 HEAD_REVISION=c20261126_sign_out_everywhere
 PRIOR_REVISION=a20261126_receipts_owner
 COPY_PATTERN='^relay_migration_dryrun_[0-9]{14}$'
-BUILD_LIMIT=2400
-DUMP_LIMIT=3600
-MIGRATE_LIMIT=1800
-PROBE_LIMIT=900
+# Time bounds, in seconds. The workflow's job timeout must cover their worst-case sum (the test checks it):
+# FETCH once; PROD six times (three inventory reads and up to three row counts); HEADS once; BUILD once; SCHEMA once;
+# DATA once; MIGRATE three times (the migration, and the re-run's downgrade and upgrade); PROBE three times;
+# PG four times (the sweep, the create, the drop and a spare).
+FETCH_LIMIT=600
+PROD_LIMIT=300
+HEADS_LIMIT=300
+PG_LIMIT=300
+BUILD_LIMIT=1200
+SCHEMA_LIMIT=900
+DATA_LIMIT=3600
+MIGRATE_LIMIT=900
+PROBE_LIMIT=600
 PG_DATA_DIR=/var/lib/postgresql/data
 GIB=$((1024 * 1024 * 1024))
 DISK_HEADROOM=$((3 * GIB))
 DOCKER_MIN_FREE=$((6 * GIB))
+# A selection above this is refused before anything is copied. At the throughput the full 73 GiB copy showed (it
+# ran past one hour), 20 GiB is well inside DATA_LIMIT.
+SELECTED_DATA_CEILING=$((20 * GIB))
 
 WORK=""
 COPY=""
@@ -79,18 +96,32 @@ read_int() {
   printf '%s' "$out"
 }
 
-# Disk guard. The copy doubles the production data on the data volume (pg_restore writes a second copy on the
+# Milliseconds since the epoch, and a phase line with its elapsed seconds (tenths).
+now_ms() { date +%s%3N; }
+phase() {
+  local ms=$(( $(now_ms) - $2 ))
+  note "phase $1: $(( ms / 1000 )).$(( (ms % 1000) / 100 )) s"
+}
+
+# Every production read goes through here: one psql session, read-only from its first statement, against the
+# production database. Callers pass only SELECTs (and SET statement_timeout) after it.
+prod_psql() {
+  timeout --kill-after=30 "$PROD_LIMIT" docker exec "$PG_CONTAINER" \
+    psql -X -q -v ON_ERROR_STOP=1 -U "$PG_USER" -d "$PG_PRODUCTION_DB" \
+    -c "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY" "$@"
+}
+
+# Disk guard. The copy holds the selected data again on the data volume (pg_restore writes a second copy on the
 # same server), and the image build writes under the Docker root. Refuse unless:
-#   free on the data volume, measured inside the postgres container AND on the VM, >= 2 x database size + 3 GiB;
+#   free on the data volume, measured inside the postgres container AND on the VM, >= 2 x selected data + 3 GiB;
 #   free under the Docker root >= 6 GiB (and under /var/lib/docker too, where that directory exists).
-# $1 is the stage, $2 what a refusal leaves behind. Prints sizes only.
+# SELECTED_BYTES is the total size of the selected data tables. $1 is the stage, $2 what a refusal leaves behind.
+# Prints sizes only.
 check_disk() {
   local stage="$1" outcome="$2"
-  local db_bytes container_free host_free volume_mount docker_root docker_root_free lib_free=""
+  local db_bytes="$SELECTED_BYTES" container_free host_free volume_mount docker_root docker_root_free lib_free=""
   local required problems=""
 
-  db_bytes="$(read_int pg -tA -c "SELECT pg_database_size('$PG_PRODUCTION_DB')")" \
-    || fail "could not read the production database size ($stage); $outcome"
   container_free="$(read_int docker exec "$PG_CONTAINER" df -B1 --output=avail "$PG_DATA_DIR")" \
     || fail "could not read free space on the postgres data directory inside the container ($stage); $outcome"
   volume_mount="$(docker volume inspect --format '{{.Mountpoint}}' "$PG_VOLUME")" || volume_mount=""
@@ -108,7 +139,7 @@ check_disk() {
   fi
 
   required=$(( 2 * db_bytes + DISK_HEADROOM ))
-  local summary="production database ${db_bytes} bytes ($(gib "$db_bytes") GiB); data volume needs $(gib "$required") GiB free (2 x database + 3 GiB); free on the data volume: in the container $(gib "$container_free") GiB, on the VM $(gib "$host_free") GiB; free under the Docker root $(gib "$docker_root_free") GiB"
+  local summary="selected data ${db_bytes} bytes ($(gib "$db_bytes") GiB); data volume needs $(gib "$required") GiB free (2 x selected data + 3 GiB); free on the data volume: in the container $(gib "$container_free") GiB, on the VM $(gib "$host_free") GiB; free under the Docker root $(gib "$docker_root_free") GiB"
   if [ -n "$lib_free" ]; then
     summary="$summary, under /var/lib/docker $(gib "$lib_free") GiB"
   fi
@@ -134,7 +165,7 @@ check_disk() {
 # One psql call against the production server's maintenance database, bounded. Only DROP/CREATE of our own
 # copy and read-only catalog queries go through it.
 pg() {
-  timeout --kill-after=30 120 docker exec "$PG_CONTAINER" \
+  timeout --kill-after=30 "$PG_LIMIT" docker exec "$PG_CONTAINER" \
     psql -X -q -v ON_ERROR_STOP=1 -U "$PG_USER" -d postgres "$@"
 }
 
@@ -154,8 +185,11 @@ cleanup() {
     docker rm -f "$RUN_NAME" >/dev/null 2>&1
   fi
   if [ "$COPY_CREATED" = 1 ]; then
+    local drop_started
+    drop_started="$(now_ms)"
     if drop_copy "$COPY"; then
       note "dropped the copy"
+      phase "drop" "$drop_started"
     else
       echo "::error::relay-migration-dryrun: the copy $COPY was NOT dropped; drop it by hand, the next run also sweeps copies of this name" >&2
       [ "$status" -ne 0 ] || status=1
@@ -178,12 +212,191 @@ running="$(docker inspect --format '{{.State.Running}}' "$PG_CONTAINER")" \
 volume="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Name}}{{end}}{{end}}' "$PG_CONTAINER")"
 [ "$volume" = "$PG_VOLUME" ] || fail "the postgres data volume is not $PG_VOLUME; nothing was copied"
 
-# Disk guard, before anything is created, copied or built.
-check_disk "before anything is copied or built" "nothing was created or copied"
-
-# umask 077 (set above) makes this directory 0700 on the VM.
+# umask 077 (set above) makes this directory 0700 on the VM. The work directory, with the cache inside it, is removed
+# on every exit, so a refusal below leaves nothing behind.
 mkdir -p "$ROOT"
 WORK="$(mktemp -d "$ROOT/run.XXXXXXXX")"
+
+# Fetch the one approved commit with the job's token, through a credential helper that reads it from the
+# environment: never argv, never a file. Same mechanism as deploy_remote.sh, into a cache of this run only.
+T_FETCH="$(now_ms)"
+CACHE="$WORK/source.git"
+git init --bare --quiet "$CACHE"
+export GH_PULL_TOKEN
+# shellcheck disable=SC2016 # expanded by git's helper shell, at request time
+HELPER='!f() { test "$1" = get || exit 0; echo username=x-access-token; echo "password=${GH_PULL_TOKEN}"; }; f'
+git -c credential.helper= -c "credential.helper=$HELPER" --git-dir="$CACHE" \
+  fetch --quiet --no-tags --depth=1 "$DRYRUN_SOURCE_URL" "$DRYRUN_REVISION"
+unset GH_PULL_TOKEN HELPER
+FETCHED="$(git --git-dir="$CACHE" rev-parse --verify 'FETCH_HEAD^{commit}')"
+[ "$FETCHED" = "$DRYRUN_REVISION" ] || fail "the fetched commit does not match the approved revision"
+SRC="$WORK/src"
+mkdir -p "$SRC"
+git --git-dir="$CACHE" archive "$DRYRUN_REVISION" | tar -x -C "$SRC"
+phase "fetch" "$T_FETCH"
+
+# Production, read only: the server version, the whole database's size (information only), and every table's size.
+T_INV="$(now_ms)"
+SERVER_VERSION="$(prod_psql -tA -c "SELECT current_setting('server_version') || ' (' || current_setting('server_version_num') || ')'")" \
+  || fail "could not read the production server version; nothing was copied"
+PROD_BYTES="$(read_int prod_psql -tA -c "SELECT pg_database_size(current_database())")" \
+  || fail "could not read the production database size; nothing was copied"
+prod_psql -tA -F "$(printf '\t')" -c "SELECT c.relname, pg_total_relation_size(c.oid), c.reltuples::bigint FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relkind = 'r' ORDER BY 1" \
+  > "$WORK/inventory.tsv" || fail "could not read the production table list; nothing was copied"
+phase "production inventory" "$T_INV"
+note "production: PostgreSQL $SERVER_VERSION; the whole database is $(gib "$PROD_BYTES") GiB (information only; the copy is selected)"
+
+# The selection comes from the approved commit's own migration files: derive.py reads the revisions from the start
+# revision (exclusive) to the head, and classifies each production table they name.
+cat > "$WORK/derive.py" <<'DERIVE'
+"""Derive the dry run's table selection from the approved commit's migration files.
+
+python -I -B - <src> <start-revision> <head-revision> <inventory.tsv> <out-dir> < derive.py
+
+The chain of revisions runs from <start-revision> (exclusive) to <head-revision> (inclusive). Every production table
+the chain names is classified by the statement that names it:
+  data         read or written by a statement (FROM, JOIN, INTO, UPDATE, DELETE FROM, REFERENCES, TRUNCATE,
+               LOCK TABLE, VACUUM, ANALYZE, to_regclass);
+  schema only  altered or created by DDL only (ALTER TABLE, DROP or CREATE TABLE, CREATE INDEX ... ON);
+  prose        named only in a comment or docstring: neither copied nor counted, but listed.
+The verifier's reads and alembic_version are always data. A table an ALTER or CREATE INDEX names that production
+does not have refuses the selection, and so does a table name the chain builds at run time: a name that cannot be
+read cannot be classified. Writes data-tables.txt, schema-tables.tsv (name, bytes, planner estimate),
+selected-bytes.txt and plan.json into out-dir. Prints table names and sizes only.
+"""
+import json
+import re
+import sys
+from pathlib import Path
+
+SRC, START, HEAD, INVENTORY, OUT = sys.argv[1:6]
+NAME = re.compile(r"^[a-z_][a-z0-9_]*$")
+REVISION = re.compile(r'^revision\s*=\s*"([^"]+)"', re.M)
+DOWN = re.compile(r'^down_revision\s*=\s*(?:"([^"]+)"|None)', re.M)
+ALWAYS_DATA = {"alembic_version"}
+VERIFIER_READS = {"account_device_owner", "account_devices", "link_account_chain",
+                  "link_state_admission", "phone_push_subscription"}
+MAX_SCHEMA_ONLY = 3
+DYNAMIC = re.compile(r"(?:alter\s+table|\bfrom|\bjoin|\binto|\bupdate|\breferences|\bon|\btable)\s*\{", re.I)
+ALTER_TARGET = re.compile(r'\balter\s+table\s+"?([A-Za-z_][A-Za-z0-9_]*)', re.I)
+INDEX_TARGET = re.compile(r'\bcreate\s+(?:unique\s+)?index\b[^;"]*?\bon\s+"?([A-Za-z_][A-Za-z0-9_]*)', re.I)
+
+
+def fail(message):
+    print(f"derive: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+tables = {}
+for raw in Path(INVENTORY).read_text(encoding="utf-8").splitlines():
+    if not raw.strip():
+        continue
+    parts = raw.split("\t")
+    if len(parts) != 3:
+        fail("the production table list is malformed")
+    name, size, estimate = parts
+    if not NAME.match(name):
+        fail("a production table name cannot be quoted safely; nothing was selected")
+    if not size.isdigit() or not re.fullmatch(r"-?[0-9]+", estimate):
+        fail("the production table list has a non-numeric size")
+    tables[name] = {"bytes": int(size), "estimate": int(estimate)}
+
+missing = (VERIFIER_READS | ALWAYS_DATA) - set(tables)
+if missing:
+    fail("production has no table " + ", ".join(sorted(missing)) + "; the verifier cannot run")
+
+files = {}
+for path in sorted(Path(SRC, "alembic", "versions").glob("*.py")):
+    text = path.read_text(encoding="utf-8")
+    revision = REVISION.search(text)
+    down = DOWN.search(text)
+    if revision and down:
+        files[revision.group(1)] = {"name": path.name, "text": text, "down": down.group(1)}
+
+chain = []
+current = HEAD
+while current != START:
+    if current is None or current not in files or len(chain) > len(files):
+        fail(f"the head does not descend from {START}")
+    chain.append(current)
+    current = files[current]["down"]
+chain.reverse()
+if not chain:
+    fail("there are no revisions between the start and the head")
+
+for revision in chain:
+    if DYNAMIC.search(files[revision]["text"]):
+        fail(f"{files[revision]['name']} builds a table name at run time; the selection cannot classify it")
+
+data_names, schema_names, prose_names = set(), set(), set()
+for revision in chain:
+    text = files[revision]["text"]
+    for target in ALTER_TARGET.findall(text) + INDEX_TARGET.findall(text):
+        if target not in tables:
+            fail(f"{files[revision]['name']} alters a table production does not have")
+    for name in tables:
+        if not re.search(rf"(?<![a-z0-9_]){re.escape(name)}(?![a-z0-9_])", text):
+            continue
+        quoted = rf'"?{re.escape(name)}"?(?![a-z0-9_])'
+        read = (re.search(rf"\b(?:from|join|into|update|references|truncate|lock\s+table|vacuum|analyze)\s+(?:only\s+)?{quoted}", text, re.I)
+                or re.search(rf"to_regclass\(\s*'{re.escape(name)}'\s*\)", text))
+        ddl = (re.search(rf"\b(?:alter\s+table|drop\s+table|create\s+table)\s+(?:if\s+(?:not\s+)?exists\s+)?{quoted}", text, re.I)
+               or re.search(rf'\bcreate\s+(?:unique\s+)?index\b[^;"]*?\bon\s+{quoted}', text, re.I))
+        if read:
+            data_names.add(name)
+        elif ddl:
+            schema_names.add(name)
+        else:
+            prose_names.add(name)
+
+data = (data_names | VERIFIER_READS | ALWAYS_DATA) & set(tables)
+schema_only = schema_names - data
+if len(schema_only) > MAX_SCHEMA_ONLY:
+    fail(f"{len(schema_only)} tables are schema only; the row-count budget covers {MAX_SCHEMA_ONLY}")
+
+data_sorted = sorted(data)
+schema_sorted = sorted(schema_only)
+selected_bytes = sum(tables[name]["bytes"] for name in data_sorted)
+out = Path(OUT)
+LF = {"encoding": "utf-8", "newline": "\n"}  # bash reads these files: LF endings on every platform
+(out / "data-tables.txt").write_text("".join(f"{name}\n" for name in data_sorted), **LF)
+(out / "schema-tables.tsv").write_text(
+    "".join(f"{name}\t{tables[name]['bytes']}\t{tables[name]['estimate']}\n" for name in schema_sorted), **LF)
+(out / "selected-bytes.txt").write_text(str(selected_bytes), **LF)
+(out / "plan.json").write_text(json.dumps({
+    "revisions": [files[revision]["name"] for revision in chain],
+    "data": data_sorted,
+    "schema_only": schema_sorted,
+    "prose_only_not_copied": sorted(prose_names - data - schema_only),
+    "selected_bytes": selected_bytes,
+}, sort_keys=True), **LF)
+
+print("revision files: " + ", ".join(files[revision]["name"] for revision in chain))
+print(f"data tables ({len(data_sorted)}): " + ", ".join(data_sorted))
+print("schema-only tables: " + (", ".join(schema_sorted) or "none"))
+prose = sorted(prose_names - data - schema_only)
+if prose:
+    print("named only in comments or docstrings, not copied: " + ", ".join(prose))
+DERIVE
+python3 -I -B "$WORK/derive.py" "$SRC" "$START_REVISION" "$HEAD_REVISION" "$WORK/inventory.tsv" "$WORK" \
+  || fail "the table selection could not be derived from the approved commit; nothing was copied"
+mapfile -t DATA_TABLES < "$WORK/data-tables.txt"
+SELECTED_BYTES="$(read_int cat "$WORK/selected-bytes.txt")" || fail "the selected size could not be read; nothing was copied"
+(( SELECTED_BYTES <= SELECTED_DATA_CEILING )) \
+  || fail "refusing: the selected data is $(gib "$SELECTED_BYTES") GiB, above the $(gib "$SELECTED_DATA_CEILING") GiB ceiling; nothing was copied or built"
+note "selected data: ${#DATA_TABLES[@]} tables, $(gib "$SELECTED_BYTES") GiB including indexes"
+
+# Disk guard, before anything is copied or built.
+check_disk "before anything is copied or built" "nothing was copied or built"
+
+# Schema-only tables: production's row count and total size, read-only. A count that cannot be read in time says so;
+# it is never reported as zero.
+note "schema-only tables (altered by the migrations, not read or written): production rows and total size"
+while IFS=$'\t' read -r table bytes estimate; do
+  rows="$(read_int prod_psql -tA -c "SET statement_timeout = '240s'" -c "SELECT count(*) FROM public.\"$table\"" < /dev/null)" \
+    || rows="not read (over 240 s or failed; planner estimate $estimate)"
+  note "  $table: production rows $rows; total size $(gib "$bytes") GiB"
+done < "$WORK/schema-tables.tsv"
 
 # Remove what an earlier, killed run could leave behind: our containers, and copies of our name.
 stale="$(docker ps -aq --filter name=relay-dryrun- 2>/dev/null || true)"
@@ -198,22 +411,6 @@ while IFS= read -r old; do
   note "dropped a copy left by an earlier run"
 done <<< "$olds"
 
-# Fetch the one approved commit with the job's token, through a credential helper that reads it from the
-# environment: never argv, never a file. Same mechanism as deploy_remote.sh.
-CACHE="$ROOT/source.git"
-[ -d "$CACHE" ] || git init --bare --quiet "$CACHE"
-export GH_PULL_TOKEN
-# shellcheck disable=SC2016 # expanded by git's helper shell, at request time
-HELPER='!f() { test "$1" = get || exit 0; echo username=x-access-token; echo "password=${GH_PULL_TOKEN}"; }; f'
-git -c credential.helper= -c "credential.helper=$HELPER" --git-dir="$CACHE" \
-  fetch --quiet --no-tags --depth=1 "$DRYRUN_SOURCE_URL" "$DRYRUN_REVISION"
-unset GH_PULL_TOKEN HELPER
-FETCHED="$(git --git-dir="$CACHE" rev-parse --verify 'FETCH_HEAD^{commit}')"
-[ "$FETCHED" = "$DRYRUN_REVISION" ] || fail "the fetched commit does not match the approved revision"
-SRC="$WORK/src"
-mkdir -p "$SRC"
-git --git-dir="$CACHE" archive "$DRYRUN_REVISION" | tar -x -C "$SRC"
-
 # The image is built from the approved commit's full tree with the deploy's own Dockerfile. The chain-import
 # migration imports react_agent.link.chain, which ships in that image as a package, so the alembic folder alone
 # cannot run it.
@@ -222,7 +419,7 @@ note "building the image for the approved commit with the deploy Dockerfile"
 timeout --kill-after=60 "$BUILD_LIMIT" docker build --quiet \
   -f "$SRC/deployments/docker/Dockerfile" -t "$IMAGE" "$SRC" >/dev/null
 
-heads="$(timeout --kill-after=30 300 docker run --rm "$IMAGE" alembic heads)" \
+heads="$(timeout --kill-after=30 "$HEADS_LIMIT" docker run --rm "$IMAGE" alembic heads)" \
   || fail "alembic cannot read the revisions of the approved commit"
 if [ "$(printf '%s\n' "$heads" | grep -c '(head)')" != 1 ] \
    || ! printf '%s\n' "$heads" | grep -Fxq "$HEAD_REVISION (head)"; then
@@ -247,14 +444,27 @@ note "created the copy; checking free space again before the restore"
 # The build has run since the first check. A shortfall now drops the copy (cleanup does it on this exit).
 check_disk "before the restore" "the copy is dropped"
 
-note "copying production into the copy (production is read only)"
-
-# pg_dump runs in production's container and reads it. pg_restore writes only into the copy.
-timeout --kill-after=60 "$DUMP_LIMIT" docker exec "$PG_CONTAINER" \
-  pg_dump -U "$PG_USER" -d "$PG_PRODUCTION_DB" -Fc --no-owner --no-acl \
-  | timeout --kill-after=60 "$DUMP_LIMIT" docker exec -i "$PG_CONTAINER" \
+# The schema of the whole database, with no rows: every ALTER and foreign key the migrations touch is the real DDL.
+# pg_dump runs in production's container and reads it; pg_restore writes only into the copy.
+T_SCHEMA="$(now_ms)"
+timeout --kill-after=60 "$SCHEMA_LIMIT" docker exec "$PG_CONTAINER" \
+  pg_dump -U "$PG_USER" -d "$PG_PRODUCTION_DB" -s -Fc --no-owner --no-acl \
+  | timeout --kill-after=60 "$SCHEMA_LIMIT" docker exec -i "$PG_CONTAINER" \
   pg_restore -U "$PG_USER" -d "$COPY" --no-owner --no-acl --exit-on-error
-note "the copy is restored"
+phase "schema copy (pg_dump -s streamed into pg_restore)" "$T_SCHEMA"
+
+# Rows for the selected tables only. --disable-triggers loads them without firing or checking foreign keys on the
+# copy. The copy's rows are production's rows as they were when the snapshot was taken, so they were valid then.
+TABLE_ARGS=()
+for table in "${DATA_TABLES[@]}"; do
+  TABLE_ARGS+=(-t "public.$table")
+done
+T_DATA="$(now_ms)"
+timeout --kill-after=60 "$DATA_LIMIT" docker exec "$PG_CONTAINER" \
+  pg_dump -U "$PG_USER" -d "$PG_PRODUCTION_DB" -a -Fc --no-owner --no-acl "${TABLE_ARGS[@]}" \
+  | timeout --kill-after=60 "$DATA_LIMIT" docker exec -i "$PG_CONTAINER" \
+  pg_restore -U "$PG_USER" -d "$COPY" -a --disable-triggers --no-owner --no-acl --exit-on-error
+phase "data copy (pg_dump of the selected tables streamed into pg_restore)" "$T_DATA"
 
 export RELAY_DRYRUN_DB="$COPY"
 export RELAY_DRYRUN_DSN="postgresql://${ENDPOINT}${COPY}"
@@ -511,6 +721,7 @@ t0="$(date +%s%3N)"
 run_alembic "$MIGRATE_LIMIT" upgrade head
 t1="$(date +%s%3N)"
 MIGRATE_MS=$((t1 - t0))
+phase "migration (alembic upgrade head)" "$t0"
 
 note "counts and checks after the migration"
 RUN_NAME="relay-dryrun-probe"
@@ -526,6 +737,7 @@ t2="$(date +%s%3N)"
 run_alembic "$MIGRATE_LIMIT" upgrade head
 t3="$(date +%s%3N)"
 RERUN_MS=$((t3 - t2))
+phase "re-run (downgrade to $PRIOR_REVISION, then upgrade head)" "$t2"
 
 RUN_NAME="relay-dryrun-probe"
 timeout --kill-after=30 "$PROBE_LIMIT" docker run --rm -i --name "$RUN_NAME" \
