@@ -1,0 +1,146 @@
+name: Deploy the aiosXaegra relay from the public builder
+
+# The builder-side route for AIOSCompanion/aiosxaegra/.github/workflows/deploy.yml, used while that
+# repository's Actions are off. Dispatch only, from this repository's main branch, for one exact commit.
+#
+# It runs the relay's own steps: the same vm-run action and scripts/deploy_remote.sh, read from the
+# checkout of the approved commit, on the same VM (aiosserver-v2, aios-460415), with the same keyless
+# Workload Identity Federation. Two gates sit in front of it: the source-access approval (the private
+# read token) and the relay-deploy approval (the production deploy identity). Health is checked after.
+#
+# It delivers NO dotenv. The deploy then uses the VM's serving .env, which the controller keeps equal
+# to the last delivered BACKEND_DOTENV_B64. Changes to that secret, or to the ACCOUNT_DEVICES_ENABLED
+# and DASHBOARD_TOKEN inputs, still go through deploy.yml, which delivers them.
+#
+# The read token travels from the source job to the deploy job as a masked job output. It is read-only,
+# scoped to aiosxaegra, and expires within one hour. It is never written to a file or an artifact.
+
+on:
+  workflow_dispatch:
+    inputs:
+      relay_sha:
+        description: Exact 40-character aiosxaegra commit to deploy (lowercase hex)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: relay-deploy
+  cancel-in-progress: false
+
+jobs:
+  source:
+    name: Mint the read token for the approved commit
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: source-access
+    timeout-minutes: 10
+    outputs:
+      token: ${{ steps.source-token.outputs.token }}
+    steps:
+      - name: Require the trusted builder main branch and an exact commit
+        env:
+          RELAY_SHA: ${{ inputs.relay_sha }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/heads/main"
+          if [[ ! "$RELAY_SHA" =~ ^[a-f0-9]{40}$ ]]; then
+            echo "::error::relay_sha must be an exact 40-character lowercase commit SHA" >&2
+            exit 1
+          fi
+
+      - name: Create a read-only App token for aiosxaegra
+        id: source-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510
+        with:
+          app-id: ${{ vars.BUILDER_APP_ID }}
+          private-key: ${{ secrets.BUILDER_APP_PRIVATE_KEY }}
+          owner: AIOSCompanion
+          repositories: aiosxaegra
+          permission-contents: read
+
+      - name: Confirm the commit exists in aiosxaegra
+        env:
+          GH_TOKEN: ${{ steps.source-token.outputs.token }}
+          RELAY_SHA: ${{ inputs.relay_sha }}
+        run: |
+          set -euo pipefail
+          found="$(gh api "repos/AIOSCompanion/aiosxaegra/commits/${RELAY_SHA}" --jq '.sha')"
+          test "$found" = "$RELAY_SHA"
+          echo "aiosxaegra commit ${RELAY_SHA} exists; the deploy job checks it out next"
+
+  deploy:
+    name: Deploy the verified commit on the relay VM
+    if: github.ref == 'refs/heads/main'
+    needs: source
+    runs-on: ubuntu-latest
+    environment: relay-deploy
+    # Matches aiosxaegra deploy.yml. Cancelling this job does not cancel the deploy: the
+    # companion-deploy unit on the VM owns it and finishes or rolls back within its own bounds.
+    timeout-minutes: 100
+    permissions:
+      contents: read
+      id-token: write   # keyless Workload Identity Federation for the deploy identity
+    env:
+      RELAY_SHA: ${{ inputs.relay_sha }}
+      RELAY_SOURCE_URL: https://github.com/AIOSCompanion/aiosxaegra
+      RELAY_DOMAIN: 34-51-149-24.sslip.io
+    steps:
+      - name: Require the trusted builder main branch
+        run: test "$GITHUB_REF" = "refs/heads/main"
+
+      - name: Check out the builder (this public repo) for the health check
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check out aiosxaegra at the approved commit
+        uses: actions/checkout@v4
+        with:
+          repository: AIOSCompanion/aiosxaegra
+          ref: ${{ inputs.relay_sha }}
+          token: ${{ needs.source.outputs.token }}
+          path: relay
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Confirm the checkout is exactly the approved commit
+        run: |
+          set -euo pipefail
+          test "$(git -C relay rev-parse HEAD)" = "$RELAY_SHA"
+          echo "checked out aiosxaegra ${RELAY_SHA}"
+
+      # The relay's own vm-run action (the one deploy.yml uses), from the approved commit. Same
+      # instance, zone, project and keyless identity as aiosxaegra deploy.yml. The identity values are
+      # repository variables of this repository, not secrets. BACKEND_DOTENV_B64 is deliberately not
+      # passed (see the header): the VM's own serving .env is used.
+      - name: Deploy on the VM with the relay's vm-run action
+        uses: ./relay/.github/actions/vm-run
+        env:
+          DEPLOY_REVISION: ${{ inputs.relay_sha }}
+          DEPLOY_SOURCE_URL: ${{ env.RELAY_SOURCE_URL }}
+          DEPLOY_DOMAIN: ${{ env.RELAY_DOMAIN }}
+          GH_PULL_TOKEN: ${{ needs.source.outputs.token }}
+          SERVING_REPOSITORY: ${{ vars.RELAY_SERVING_REPOSITORY }}
+        with:
+          script_file: relay/scripts/deploy_remote.sh
+          pass_env: >-
+            DEPLOY_REVISION DEPLOY_SOURCE_URL DEPLOY_DOMAIN GH_PULL_TOKEN SERVING_REPOSITORY
+          instance: aiosserver-v2
+          zone: europe-north2-b
+          project: aios-460415
+          workload_identity_provider: ${{ vars.RELAY_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.RELAY_GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: Verify the relay is healthy over TLS
+        run: >-
+          python3 -I -B scripts/check_relay_health.py
+          --url "https://${RELAY_DOMAIN}/health" --attempts 20 --interval 15
+        env:
+          RELAY_DOMAIN: ${{ env.RELAY_DOMAIN }}
+
+      - name: Record the deployed commit
+        run: |
+          echo "### Relay deployed: ${RELAY_SHA} (healthy at https://${RELAY_DOMAIN})" >> "$GITHUB_STEP_SUMMARY"

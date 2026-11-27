@@ -96,6 +96,15 @@ Timeouts remain failures; diagnostic runs do not bypass the test or release gate
   credentials; publication steps upload only allowlisted executables, ZIPs, checksums and receipts.
   Both native rows must pass before final draft verification. It always leaves an unpublished draft.
   See [the new app release contract](docs/APP_RELEASE.md) for configuration and outstanding acceptance gates.
+- `relay-deploy.yml`: deploys one exact `aiosxaegra` commit to the relay VM, with the relay's own `vm-run`
+  action and `deploy_remote.sh` from that commit, then checks `/health`. Dispatch only, from main. It needs
+  the `source-access` approval (read token) and the `relay-deploy` approval (deploy identity). It delivers no
+  dotenv: the VM keeps its serving `.env`. Changes to the production dotenv still go through the relay's own
+  `deploy.yml`.
+- `portal-deploy.yml`: builds, tests, gates and deploys one exact `AIOS_Commercial` commit with the steps of its
+  `deploy-portal.yml`. `mode: preview` publishes a preview channel; `mode: live` publishes
+  `app.aioscompanion.com`. Dispatch only, from main. Both modes need the `source-access` and `portal-deploy`
+  approvals.
 - `test.yml`: PR tests for a PR head SHA on a private repository. Dispatch only. No `pull_request` trigger.
 - `catch-up.yml`: expands a truncated push into individual test dispatches, after
   `source-access` owner approval. The external bridge cannot read private commit history.
