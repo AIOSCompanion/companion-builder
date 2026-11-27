@@ -134,10 +134,14 @@ class DryRunProgramBoundaryTests(unittest.TestCase):
 
     def test_the_production_database_is_named_only_in_the_read_only_dump(self):
         uses = [line for line in self.lines if '$PG_PRODUCTION_DB' in line]
-        self.assertEqual(len(uses), 1)
-        self.assertIn('pg_dump', uses[0])
-        self.assertIn('--no-owner', uses[0])
-        self.assertNotIn('pg_restore', uses[0])
+        self.assertEqual(len(uses), 2, uses)
+        dump = [line for line in uses if 'pg_dump' in line]
+        size = [line for line in uses if 'pg_database_size' in line]
+        self.assertEqual(len(dump), 1)
+        self.assertEqual(len(size), 1)
+        self.assertIn('--no-owner', dump[0])
+        self.assertNotIn('pg_restore', dump[0])
+        self.assertIn('SELECT pg_database_size', size[0])
 
     def test_no_production_container_is_restarted_stopped_recreated_or_reached_through_compose(self):
         for forbidden in ('docker restart', 'docker stop', 'docker kill', 'docker start', 'docker compose',
@@ -162,6 +166,21 @@ class DryRunProgramBoundaryTests(unittest.TestCase):
     def test_the_embedded_programs_compile(self):
         for tag in ('PROBE', 'SUMMARY'):
             compile(self.heredoc(tag), tag, 'exec')
+
+    def test_the_disk_guard_runs_before_anything_is_created_copied_or_built_and_again_before_the_restore(self):
+        order = [self.source.index('check_disk "before anything is copied or built"'),
+                 self.source.index('mktemp -d'),
+                 self.source.index('docker build --quiet'),
+                 self.source.index('CREATE DATABASE'),
+                 self.source.index('check_disk "before the restore"'),
+                 self.source.index('pg_dump -U')]
+        self.assertEqual(order, sorted(order))
+        self.assertEqual(self.source.count('check_disk "'), 2)
+
+    def test_the_disk_thresholds_are_the_agreed_ones(self):
+        self.assertIn('DISK_HEADROOM=$((3 * GIB))', self.source)
+        self.assertIn('DOCKER_MIN_FREE=$((6 * GIB))', self.source)
+        self.assertIn('required=$(( 2 * db_bytes + DISK_HEADROOM ))', self.source)
 
     def test_the_copy_name_is_fixed_and_timestamped(self):
         self.assertIn("COPY_PATTERN='^relay_migration_dryrun_[0-9]{14}$'", self.source)
@@ -192,10 +211,21 @@ case "$1" in
       *State.Running*) echo true ;;
       *) echo aiosxaegra_postgres_data ;;
     esac ;;
+  volume)
+    echo "$STUB_VOLUME_MOUNT" ;;
+  info)
+    echo "$STUB_DOCKER_ROOT" ;;
   exec)
     case "$*" in
       *printenv*) echo stub-password ;;
       *pg_restore*) cat > /dev/null ;;
+      *pg_database_size*) echo "$STUB_DB_SIZE" ;;
+      *" df "*)
+        n=$(cat "$STUB_LOG.df" 2>/dev/null || echo 0)
+        n=$((n + 1))
+        echo "$n" > "$STUB_LOG.df"
+        if [ "$n" -eq 1 ]; then echo "Avail"; echo "$STUB_CONTAINER_FREE"
+        else echo "Avail"; echo "${STUB_CONTAINER_FREE_LATER:-$STUB_CONTAINER_FREE}"; fi ;;
     esac ;;
   run)
     case "$*" in
@@ -205,6 +235,18 @@ case "$1" in
     esac ;;
 esac
 exit 0
+'''
+
+STUB_DF = r'''#!/usr/bin/env bash
+echo "df $*" >> "$STUB_LOG"
+path="${@: -1}"
+case "$path" in
+  *stub-volume*) value="$STUB_HOST_FREE" ;;
+  *stub-docker-root*|*/var/lib/docker*) value="$STUB_DOCKER_FREE" ;;
+  *) value="" ;;
+esac
+echo "Avail"
+echo "$value"
 '''
 
 STUB_GIT = r'''#!/usr/bin/env bash
@@ -228,52 +270,141 @@ def write_stub(path, body):
     os.chmod(path, 0o755)
 
 
+GIB = 1024 ** 3
+# A healthy host: an 8 GiB database needs 2 x 8 + 3 = 19 GiB free on the data volume, and 6 GiB under Docker.
+HEALTHY = {
+    'STUB_DB_SIZE': str(8 * GIB),
+    'STUB_CONTAINER_FREE': str(40 * GIB),
+    'STUB_HOST_FREE': str(40 * GIB),
+    'STUB_DOCKER_FREE': str(40 * GIB),
+    'STUB_VOLUME_MOUNT': '/srv/stub-volume/_data',
+    'STUB_DOCKER_ROOT': '/srv/stub-docker-root',
+}
+
+
+class VmRun:
+    def __init__(self, returncode, output, calls, state_created, leftovers):
+        self.returncode = returncode
+        self.output = output
+        self.calls = calls
+        self.state_created = state_created
+        self.leftovers = leftovers
+
+
+def run_vm_program(**overrides):
+    """Run the real VM program with stub docker, df, git, timeout and python3 on PATH."""
+    bash = find_bash()
+    if bash is None:
+        raise unittest.SkipTest('no bash available to run the VM program')
+    values = dict(HEALTHY)
+    values.update(overrides)
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        stubs = tmp / 'bin'
+        stubs.mkdir()
+        state = tmp / 'state'  # not created here: the program must create it, or not
+        log = tmp / 'calls.log'
+        log.write_text('', encoding='utf-8')
+        write_stub(stubs / 'docker', STUB_DOCKER)
+        write_stub(stubs / 'df', STUB_DF)
+        write_stub(stubs / 'git', STUB_GIT)
+        write_stub(stubs / 'timeout', STUB_TIMEOUT)
+        write_stub(stubs / 'python3', f'#!/usr/bin/env bash\nexec "{msys(sys.executable)}" "$@"\n')
+        env = {
+            'PATH': '/usr/bin:/bin',
+            'HOME': msys(tmp),
+            'STUB_DIR': msys(stubs),
+            'PROGRAM': msys(PROGRAM),
+            'DRYRUN_REVISION': REVISION,
+            'DRYRUN_SOURCE_URL': 'https://github.com/AIOSCompanion/aiosxaegra',
+            'GH_PULL_TOKEN': TOKEN,
+            'RELAY_DRYRUN_STATE': msys(state),
+            'STUB_LOG': msys(log),
+        }
+        env.update(values)
+        # Prepend the stubs inside bash, then source the program in that same shell: Git Bash puts its own tool
+        # directories ahead of any inherited PATH, including when a second bash starts.
+        launch = 'PATH="$STUB_DIR:$PATH"; export PATH; . "$PROGRAM"'
+        result = subprocess.run([bash, '-c', launch], env=env, capture_output=True, text=True, timeout=120)
+        calls = log.read_text(encoding='utf-8')
+        state_created = state.exists()
+        leftovers = list(state.glob('run.*')) if state_created else []
+    return VmRun(result.returncode, result.stdout + result.stderr, calls, state_created, leftovers)
+
+
 class FailedMigrationStillDropsTheCopyTests(unittest.TestCase):
     def test_a_failed_migration_drops_the_copy_and_keeps_the_login_out_of_every_output(self):
-        bash = find_bash()
-        if bash is None:
-            self.skipTest('no bash available to run the VM program')
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp = Path(tmp)
-            stubs = tmp / 'bin'
-            stubs.mkdir()
-            state = tmp / 'state'
-            state.mkdir()
-            log = tmp / 'calls.log'
-            log.write_text('', encoding='utf-8')
-            write_stub(stubs / 'docker', STUB_DOCKER)
-            write_stub(stubs / 'git', STUB_GIT)
-            write_stub(stubs / 'timeout', STUB_TIMEOUT)
-            write_stub(stubs / 'python3', f'#!/usr/bin/env bash\nexec "{msys(sys.executable)}" "$@"\n')
-            env = {
-                'PATH': '/usr/bin:/bin',
-                'HOME': msys(tmp),
-                'STUB_DIR': msys(stubs),
-                'PROGRAM': msys(PROGRAM),
-                'DRYRUN_REVISION': REVISION,
-                'DRYRUN_SOURCE_URL': 'https://github.com/AIOSCompanion/aiosxaegra',
-                'GH_PULL_TOKEN': TOKEN,
-                'RELAY_DRYRUN_STATE': msys(state),
-                'STUB_LOG': msys(log),
-            }
-            # Prepend the stubs inside bash, then source the program in that same shell: Git Bash puts its own tool
-            # directories ahead of any inherited PATH, including when a second bash starts.
-            launch = 'PATH="$STUB_DIR:$PATH"; export PATH; . "$PROGRAM"'
-            result = subprocess.run([bash, '-c', launch], env=env, capture_output=True, text=True, timeout=120)
-            calls = log.read_text(encoding='utf-8')
-
-        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-        created = re.search(r'CREATE DATABASE \\?"?(relay_migration_dryrun_\d{14})', calls)
-        self.assertIsNotNone(created, calls + result.stdout + result.stderr)
+        run = run_vm_program()
+        self.assertNotEqual(run.returncode, 0, run.output)
+        created = re.search(r'CREATE DATABASE \\?"?(relay_migration_dryrun_\d{14})', run.calls)
+        self.assertIsNotNone(created, run.calls + run.output)
         copy = created.group(1)
-        self.assertIn(f'DROP DATABASE IF EXISTS "{copy}"', calls)
-        self.assertLess(calls.index('alembic upgrade head'), calls.index('DROP DATABASE'))
-        self.assertIn('docker rm -f relay-dryrun-alembic', calls)
-        self.assertIn(f'docker image rm -f relay-migration-dryrun:{REVISION[:12]}', calls)
-        self.assertEqual(list(state.glob('run.*')), [], 'the work directory must be removed')
-        combined = result.stdout + result.stderr + calls
+        self.assertIn(f'DROP DATABASE IF EXISTS "{copy}"', run.calls)
+        self.assertLess(run.calls.index('alembic upgrade head'), run.calls.index('DROP DATABASE'))
+        self.assertIn('docker rm -f relay-dryrun-alembic', run.calls)
+        self.assertIn(f'docker image rm -f relay-migration-dryrun:{REVISION[:12]}', run.calls)
+        self.assertEqual(run.leftovers, [], 'the work directory must be removed')
+        combined = run.output + run.calls
         self.assertNotIn(TOKEN, combined)
         self.assertNotIn('stub-password', combined)
+
+
+class DiskGuardTests(unittest.TestCase):
+    """The copy doubles production's data on the same volume, and the build writes under the Docker root."""
+
+    def assert_refused_before_anything_was_created(self, run, expected):
+        self.assertNotEqual(run.returncode, 0, run.output)
+        self.assertIn('refusing (before anything is copied or built)', run.output)
+        self.assertIn(expected, run.output)
+        self.assertNotIn('CREATE DATABASE', run.calls)
+        self.assertNotIn('docker build', run.calls)
+        self.assertNotIn('pg_dump', run.calls)
+        self.assertNotIn('git ', run.calls)
+        self.assertFalse(run.state_created, 'the state directory must not be created on a refusal')
+
+    def test_refuses_when_the_data_volume_is_short_in_the_container_and_creates_nothing(self):
+        # 2 x 8 GiB + 3 GiB = 19 GiB needed; the container reports 18 GiB free.
+        run = run_vm_program(STUB_CONTAINER_FREE=str(18 * GIB))
+        self.assert_refused_before_anything_was_created(run, 'in the container 18.00 GiB')
+        self.assertIn('(8.00 GiB)', run.output)
+
+    def test_refuses_when_the_data_volume_is_short_on_the_vm_even_if_the_container_agrees(self):
+        run = run_vm_program(STUB_HOST_FREE=str(18 * GIB))
+        self.assert_refused_before_anything_was_created(run, 'on the VM 18.00 GiB')
+
+    def test_refuses_when_the_docker_root_has_less_than_6_GiB_free(self):
+        run = run_vm_program(STUB_DOCKER_FREE=str(5 * GIB))
+        self.assert_refused_before_anything_was_created(run, 'Docker root below 6 GiB')
+        self.assertIn('under the Docker root 5.00 GiB', run.output)
+
+    def test_refuses_rather_than_guessing_when_a_measurement_is_not_a_number(self):
+        run = run_vm_program(STUB_DB_SIZE='not-a-number')
+        self.assertNotEqual(run.returncode, 0, run.output)
+        self.assertIn('could not read the production database size', run.output)
+        self.assertNotIn('CREATE DATABASE', run.calls)
+        self.assertFalse(run.state_created)
+
+    def test_the_recheck_before_the_restore_drops_the_copy_and_never_restores(self):
+        # The first check (before anything) passes with 40 GiB; the recheck after the copy is created sees 15 GiB.
+        run = run_vm_program(STUB_CONTAINER_FREE_LATER=str(15 * GIB))
+        self.assertNotEqual(run.returncode, 0, run.output)
+        self.assertIn('refusing (before the restore)', run.output)
+        self.assertIn('the copy is dropped', run.output)
+        self.assertLess(run.calls.index('docker build'), run.calls.index('CREATE DATABASE'))
+        self.assertLess(run.calls.index('CREATE DATABASE'), run.calls.index('DROP DATABASE'))
+        self.assertNotIn('pg_restore', run.calls)
+        self.assertNotIn('pg_dump', run.calls)
+        self.assertEqual(run.leftovers, [])
+
+    def test_with_space_to_spare_both_checks_pass_and_the_copy_is_restored(self):
+        run = run_vm_program()
+        self.assertNotIn('refusing', run.output)
+        self.assertIn('disk check (before anything is copied or built)', run.output)
+        self.assertIn('disk check (before the restore)', run.output)
+        self.assertIn('pg_restore', run.calls)
+        # The stub migration fails on purpose, so the run ends there, after the copy was dropped.
+        self.assertIn('alembic upgrade head', run.calls)
+        self.assertIn('DROP DATABASE', run.calls)
 
 
 if __name__ == '__main__':

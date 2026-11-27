@@ -11,6 +11,10 @@
 #   the copy     relay_migration_dryrun_<timestamp>. Every migration statement runs against it. The probe opens it
 #                read-only and refuses any other database.
 #   the work     a root-only directory under ROOT: the source export, the built image and the probe output.
+#   disk         refuses before anything is created, copied or built unless the data volume has at least
+#                2 x the production database size + 3 GiB free (measured in the container and on the VM) and the
+#                Docker root (and /var/lib/docker, where it exists) has at least 6 GiB free. It measures again
+#                after the copy is created and before the restore, and drops the copy if the room has gone.
 #
 # Every exit path removes the containers it started, drops the copy (a failed drop is a failed run), removes the
 # built image and the work directory. The migrations are the code under test; this program is the trusted harness.
@@ -48,6 +52,10 @@ BUILD_LIMIT=2400
 DUMP_LIMIT=3600
 MIGRATE_LIMIT=1800
 PROBE_LIMIT=900
+PG_DATA_DIR=/var/lib/postgresql/data
+GIB=$((1024 * 1024 * 1024))
+DISK_HEADROOM=$((3 * GIB))
+DOCKER_MIN_FREE=$((6 * GIB))
 
 WORK=""
 COPY=""
@@ -57,6 +65,71 @@ RUN_NAME=""
 
 note() { echo "relay-migration-dryrun: $*"; }
 fail() { echo "::error::relay-migration-dryrun: $*" >&2; exit 1; }
+
+# Bytes as GiB with two decimals, for the messages. Sizes only, never contents.
+gib() { printf '%d.%02d' $(( $1 / GIB )) $(( ($1 % GIB) * 100 / GIB )); }
+
+# Run a measuring command and accept only a plain non-negative integer from its last line (df prints a header
+# first). Anything else (an error, an empty answer, text) is a failed measurement, never a zero: the caller refuses.
+read_int() {
+  local out
+  out="$("$@")" || return 1
+  out="$(printf '%s\n' "$out" | tail -n 1 | tr -d '[:space:]')"
+  [[ "$out" =~ ^[0-9]+$ ]] || return 1
+  printf '%s' "$out"
+}
+
+# Disk guard. The copy doubles the production data on the data volume (pg_restore writes a second copy on the
+# same server), and the image build writes under the Docker root. Refuse unless:
+#   free on the data volume, measured inside the postgres container AND on the VM, >= 2 x database size + 3 GiB;
+#   free under the Docker root >= 6 GiB (and under /var/lib/docker too, where that directory exists).
+# $1 is the stage, $2 what a refusal leaves behind. Prints sizes only.
+check_disk() {
+  local stage="$1" outcome="$2"
+  local db_bytes container_free host_free volume_mount docker_root docker_root_free lib_free=""
+  local required problems=""
+
+  db_bytes="$(read_int pg -tA -c "SELECT pg_database_size('$PG_PRODUCTION_DB')")" \
+    || fail "could not read the production database size ($stage); $outcome"
+  container_free="$(read_int docker exec "$PG_CONTAINER" df -B1 --output=avail "$PG_DATA_DIR")" \
+    || fail "could not read free space on the postgres data directory inside the container ($stage); $outcome"
+  volume_mount="$(docker volume inspect --format '{{.Mountpoint}}' "$PG_VOLUME")" || volume_mount=""
+  [[ "$volume_mount" == /* ]] || fail "could not read the data volume's mount point on the VM ($stage); $outcome"
+  host_free="$(read_int df -B1 --output=avail "$volume_mount")" \
+    || fail "could not read free space on the data volume on the VM ($stage); $outcome"
+  docker_root="$(docker info --format '{{.DockerRootDir}}')" \
+    || fail "could not read the Docker root directory ($stage); $outcome"
+  [[ "$docker_root" == /* ]] || fail "the Docker root directory is not an absolute path ($stage); $outcome"
+  docker_root_free="$(read_int df -B1 --output=avail "$docker_root")" \
+    || fail "could not read free space under the Docker root ($stage); $outcome"
+  if [ -d /var/lib/docker ]; then
+    lib_free="$(read_int df -B1 --output=avail /var/lib/docker)" \
+      || fail "could not read free space under /var/lib/docker ($stage); $outcome"
+  fi
+
+  required=$(( 2 * db_bytes + DISK_HEADROOM ))
+  local summary="production database ${db_bytes} bytes ($(gib "$db_bytes") GiB); data volume needs $(gib "$required") GiB free (2 x database + 3 GiB); free on the data volume: in the container $(gib "$container_free") GiB, on the VM $(gib "$host_free") GiB; free under the Docker root $(gib "$docker_root_free") GiB"
+  if [ -n "$lib_free" ]; then
+    summary="$summary, under /var/lib/docker $(gib "$lib_free") GiB"
+  fi
+  note "disk check ($stage): $summary"
+
+  if (( container_free < required )); then
+    problems="$problems data volume (in the container) below $(gib "$required") GiB;"
+  fi
+  if (( host_free < required )); then
+    problems="$problems data volume (on the VM) below $(gib "$required") GiB;"
+  fi
+  if (( docker_root_free < DOCKER_MIN_FREE )); then
+    problems="$problems Docker root below 6 GiB;"
+  fi
+  if [ -n "$lib_free" ] && (( lib_free < DOCKER_MIN_FREE )); then
+    problems="$problems /var/lib/docker below 6 GiB;"
+  fi
+  if [ -n "$problems" ]; then
+    fail "refusing ($stage):$problems $summary; $outcome"
+  fi
+}
 
 # One psql call against the production server's maintenance database, bounded. Only DROP/CREATE of our own
 # copy and read-only catalog queries go through it.
@@ -105,9 +178,11 @@ running="$(docker inspect --format '{{.State.Running}}' "$PG_CONTAINER")" \
 volume="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Name}}{{end}}{{end}}' "$PG_CONTAINER")"
 [ "$volume" = "$PG_VOLUME" ] || fail "the postgres data volume is not $PG_VOLUME; nothing was copied"
 
-if [ ! -d "$ROOT" ]; then
-  install -d -m 0700 "$ROOT"
-fi
+# Disk guard, before anything is created, copied or built.
+check_disk "before anything is copied or built" "nothing was created or copied"
+
+# umask 077 (set above) makes this directory 0700 on the VM.
+mkdir -p "$ROOT"
 WORK="$(mktemp -d "$ROOT/run.XXXXXXXX")"
 
 # Remove what an earlier, killed run could leave behind: our containers, and copies of our name.
@@ -167,7 +242,12 @@ COPY="relay_migration_dryrun_$(date -u +%Y%m%d%H%M%S)"
 [[ "$COPY" =~ $COPY_PATTERN ]] || fail "the copy name is not valid"
 pg -c "CREATE DATABASE \"$COPY\"" >/dev/null
 COPY_CREATED=1
-note "created the copy; copying production into it (production is read only)"
+note "created the copy; checking free space again before the restore"
+
+# The build has run since the first check. A shortfall now drops the copy (cleanup does it on this exit).
+check_disk "before the restore" "the copy is dropped"
+
+note "copying production into the copy (production is read only)"
 
 # pg_dump runs in production's container and reads it. pg_restore writes only into the copy.
 timeout --kill-after=60 "$DUMP_LIMIT" docker exec "$PG_CONTAINER" \
