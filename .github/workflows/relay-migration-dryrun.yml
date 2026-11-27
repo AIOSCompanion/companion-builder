@@ -1,0 +1,128 @@
+name: Dry-run the relay's database migrations on a copy of production
+
+# Dispatch only, from this repository's main branch, for one exact aiosxaegra commit. On the relay VM it copies
+# the production database into a NEW database on the same postgres server (pg_dump reads production; pg_restore
+# writes only the copy), runs `alembic upgrade head` from that commit's image against the copy only, checks the
+# result, and drops the copy. It never writes to production and never restarts, stops or recreates a container.
+#
+# It is gated by the relay-deploy approval (the same deploy identity and environment as relay-deploy.yml).
+# The read token is minted inside the job: read-only, scoped to aiosxaegra, expires within one hour, and never
+# written to a file or an artifact.
+#
+# The VM program is scripts/relay_migration_dryrun_remote.sh from this repository's main branch, not from the
+# approved commit. The approved commit supplies only the migrations and their code under test.
+#
+# vm-run returns no output channel, so the counts are printed by the VM program to the step log, and its
+# check verdicts appear as annotations (counts and check names only). The job summary records the outcome.
+
+on:
+  workflow_dispatch:
+    inputs:
+      relay_sha:
+        description: Exact 40-character aiosxaegra commit whose migrations to dry-run (lowercase hex)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: relay-migration-dryrun
+  cancel-in-progress: false
+
+jobs:
+  dryrun:
+    name: Migrate a copy of production data on the relay VM
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: relay-deploy
+    # The VM program's own bounds (build, dump, migrate, re-run, probes) can add up to more than a typical run.
+    # Its copy is dropped on every exit path it reaches; a copy left by a killed run is swept by the next dispatch.
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      id-token: write   # keyless Workload Identity Federation for the deploy identity
+    env:
+      RELAY_SHA: ${{ inputs.relay_sha }}
+      RELAY_SOURCE_URL: https://github.com/AIOSCompanion/aiosxaegra
+    steps:
+      - name: Require the trusted builder main branch and an exact commit
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/heads/main"
+          if [[ ! "$RELAY_SHA" =~ ^[a-f0-9]{40}$ ]]; then
+            echo "::error::relay_sha must be an exact 40-character lowercase commit SHA" >&2
+            exit 1
+          fi
+
+      - name: Create a read-only App token for aiosxaegra
+        id: source-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510
+        with:
+          app-id: ${{ vars.BUILDER_APP_ID }}
+          private-key: ${{ secrets.BUILDER_APP_PRIVATE_KEY }}
+          owner: AIOSCompanion
+          repositories: aiosxaegra
+          permission-contents: read
+
+      - name: Confirm the commit exists in aiosxaegra
+        env:
+          GH_TOKEN: ${{ steps.source-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          found="$(gh api "repos/AIOSCompanion/aiosxaegra/commits/${RELAY_SHA}" --jq '.sha')"
+          test "$found" = "$RELAY_SHA"
+          echo "aiosxaegra commit ${RELAY_SHA} exists; it is checked out next"
+
+      - name: Check out the builder (this public repo) for the VM program
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check out aiosxaegra at the approved commit
+        uses: actions/checkout@v4
+        with:
+          repository: AIOSCompanion/aiosxaegra
+          ref: ${{ inputs.relay_sha }}
+          token: ${{ steps.source-token.outputs.token }}
+          path: relay
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Confirm the checkout is exactly the approved commit
+        run: |
+          set -euo pipefail
+          test "$(git -C relay rev-parse HEAD)" = "$RELAY_SHA"
+          echo "checked out aiosxaegra ${RELAY_SHA}"
+
+      # The relay's own vm-run action, from the approved commit: the same instance, zone, project and keyless
+      # identity as relay-deploy.yml. No dotenv is passed; the VM program reads the production database
+      # connection in memory only, from the postgres container.
+      - name: Dry-run the migrations on the VM copy
+        id: dryrun
+        uses: ./relay/.github/actions/vm-run
+        env:
+          DRYRUN_REVISION: ${{ inputs.relay_sha }}
+          DRYRUN_SOURCE_URL: ${{ env.RELAY_SOURCE_URL }}
+          GH_PULL_TOKEN: ${{ steps.source-token.outputs.token }}
+        with:
+          script_file: scripts/relay_migration_dryrun_remote.sh
+          pass_env: DRYRUN_REVISION DRYRUN_SOURCE_URL GH_PULL_TOKEN
+          instance: aiosserver-v2
+          zone: europe-north2-b
+          project: aios-460415
+          workload_identity_provider: ${{ vars.RELAY_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.RELAY_GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: Record the dry-run outcome
+        if: always()
+        env:
+          OUTCOME: ${{ steps.dryrun.outcome }}
+        run: |
+          {
+            echo "### Relay migration dry run: ${RELAY_SHA}"
+            echo ""
+            echo "Outcome: ${OUTCOME}."
+            echo ""
+            echo "Production was read only. The counts are in the step log of the VM dry run; the check verdicts are in this run's annotations."
+          } >> "$GITHUB_STEP_SUMMARY"
