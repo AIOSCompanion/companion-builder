@@ -27,8 +27,14 @@ def set_value(kind, name, value, *, environment=None, run=subprocess.run):
         raise RuntimeError(f"could not configure {kind} {name}; no value was printed")
 
 
+# Every environment that reads private source holds its own copy of the reader app key, and each requires a
+# reviewer and runs only from main: tests (source-access), releases (release-signing), and the relay and portal
+# deploys, whose jobs mint the read token themselves because GitHub drops a secret job output.
+APP_KEY_ENVIRONMENTS = ("source-access", "release-signing", "relay-deploy", "portal-deploy")
+
+
 def set_app_key(value, *, run=subprocess.run):
-    for environment in ("source-access", "release-signing"):
+    for environment in APP_KEY_ENVIRONMENTS:
         set_value("secret", "BUILDER_APP_PRIVATE_KEY", value, environment=environment, run=run)
 
 
