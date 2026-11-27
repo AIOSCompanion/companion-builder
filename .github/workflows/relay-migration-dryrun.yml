@@ -1,9 +1,11 @@
-name: Dry-run the relay's database migrations on a copy of production
+name: Dry-run the relay's database migrations on a selective copy of production
 
-# Dispatch only, from this repository's main branch, for one exact aiosxaegra commit. On the relay VM it copies
-# the production database into a NEW database on the same postgres server (pg_dump reads production; pg_restore
-# writes only the copy), runs `alembic upgrade head` from that commit's image against the copy only, checks the
-# result, and drops the copy. It never writes to production and never restarts, stops or recreates a container.
+# Dispatch only, from this repository's main branch, for one exact aiosxaegra commit. On the relay VM it copies the
+# WHOLE SCHEMA of the production database and the DATA of only the tables the commit's migrations read or write
+# (derived from those migration files) into a NEW database on the same postgres server. pg_dump reads production;
+# pg_restore writes only the copy. It then runs `alembic upgrade head` from that commit's image against the copy only,
+# re-runs the data rewrite, checks the result, and drops the copy. It never writes to production and never restarts,
+# stops or recreates a container.
 #
 # It is gated by the relay-deploy approval (the same deploy identity and environment as relay-deploy.yml).
 # The read token is minted inside the job: read-only, scoped to aiosxaegra, expires within one hour, and never
@@ -36,9 +38,12 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: relay-deploy
-    # The VM program's own bounds (build, dump, migrate, re-run, probes) can add up to more than a typical run.
-    # Its copy is dropped on every exit path it reaches; a copy left by a killed run is swept by the next dispatch.
-    timeout-minutes: 180
+    # The job timeout is the worst case of the VM program's own bounds (scripts/relay_migration_dryrun_remote.sh,
+    # FETCH, PROD, HEADS, BUILD, SCHEMA, DATA, MIGRATE, PROBE and PG limits; the test checks the sum). A typical run
+    # finishes far sooner: the selected data is capped at 20 GiB, and the phase times are printed in the step log.
+    # The copy is dropped on every exit path the program reaches; a copy left by a killed run is swept by the next
+    # dispatch.
+    timeout-minutes: 270
     permissions:
       contents: read
       id-token: write   # keyless Workload Identity Federation for the deploy identity

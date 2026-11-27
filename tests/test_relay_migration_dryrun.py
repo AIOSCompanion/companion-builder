@@ -55,6 +55,17 @@ class DryRunWorkflowTests(unittest.TestCase):
         self.assertNotIn('outputs', job)
         self.assertEqual(job['permissions'], {'contents': 'read', 'id-token': 'write'})
 
+    def test_the_job_timeout_covers_the_worst_case_of_every_phase_bound(self):
+        constants = dict(re.findall(r'^([A-Z_]+_LIMIT)=([0-9]+)$', PROGRAM.read_text(encoding='utf-8'), re.M))
+        for name in ('FETCH', 'PROD', 'HEADS', 'PG', 'BUILD', 'SCHEMA', 'DATA', 'MIGRATE', 'PROBE'):
+            self.assertIn(f'{name}_LIMIT', constants)
+        n = {name: int(constants[f'{name}_LIMIT']) for name in
+             ('FETCH', 'PROD', 'HEADS', 'PG', 'BUILD', 'SCHEMA', 'DATA', 'MIGRATE', 'PROBE')}
+        # Each phase counted with its multiplicity in the program (see the comment above the limits).
+        budget = (n['FETCH'] + 6 * n['PROD'] + n['HEADS'] + n['BUILD'] + n['SCHEMA'] + n['DATA']
+                  + 3 * n['MIGRATE'] + 3 * n['PROBE'] + 4 * n['PG'])
+        self.assertLessEqual(budget, int(self.workflow['jobs']['dryrun']['timeout-minutes']) * 60)
+
     def test_concurrency_never_cancels_a_running_dry_run(self):
         self.assertEqual(self.workflow['concurrency']['group'], 'relay-migration-dryrun')
         self.assertFalse(self.workflow['concurrency']['cancel-in-progress'])
@@ -132,16 +143,16 @@ class DryRunProgramBoundaryTests(unittest.TestCase):
         self.assertIn('drop_copy "$COPY"', cleanup)
         self.assertIn('status=1', cleanup)
 
-    def test_the_production_database_is_named_only_in_the_read_only_dump(self):
+    def test_the_production_database_is_named_only_in_the_read_only_helper_and_the_two_dumps(self):
         uses = [line for line in self.lines if '$PG_PRODUCTION_DB' in line]
-        self.assertEqual(len(uses), 2, uses)
-        dump = [line for line in uses if 'pg_dump' in line]
-        size = [line for line in uses if 'pg_database_size' in line]
-        self.assertEqual(len(dump), 1)
-        self.assertEqual(len(size), 1)
-        self.assertIn('--no-owner', dump[0])
-        self.assertNotIn('pg_restore', dump[0])
-        self.assertIn('SELECT pg_database_size', size[0])
+        helper = [line for line in uses if 'pg_dump' not in line]
+        dumps = [line for line in uses if 'pg_dump' in line]
+        self.assertEqual(len(helper), 1, uses)
+        self.assertIn('psql -X -q', helper[0])
+        self.assertEqual(len(dumps), 2, uses)
+        for line in dumps:
+            self.assertIn('--no-owner', line)
+            self.assertNotIn('pg_restore', line)
 
     def test_no_production_container_is_restarted_stopped_recreated_or_reached_through_compose(self):
         for forbidden in ('docker restart', 'docker stop', 'docker kill', 'docker start', 'docker compose',
@@ -152,8 +163,11 @@ class DryRunProgramBoundaryTests(unittest.TestCase):
                 self.assertIsNone(re.search(r'\baegra\b', line), line)
 
     def test_no_migration_or_data_statement_is_sent_to_production(self):
+        # The embedded programs (derive, probe, summary) are files the VM writes and runs; they are not sent to
+        # production. Only the shell's own commands are checked.
+        shell = re.sub(r"<<'(\w+)'\n.*?\n\1\n", '', self.source, flags=re.S)
         for statement in ('ALTER TABLE', 'INSERT INTO', 'DELETE FROM', 'TRUNCATE', 'DROP TABLE'):
-            self.assertNotIn(statement, self.source, statement)
+            self.assertNotIn(statement, shell, statement)
 
     def test_the_probe_is_read_only_and_refuses_any_database_but_the_copy(self):
         probe = self.heredoc('PROBE')
@@ -168,12 +182,15 @@ class DryRunProgramBoundaryTests(unittest.TestCase):
             compile(self.heredoc(tag), tag, 'exec')
 
     def test_the_disk_guard_runs_before_anything_is_created_copied_or_built_and_again_before_the_restore(self):
-        order = [self.source.index('check_disk "before anything is copied or built"'),
-                 self.source.index('mktemp -d'),
+        order = [self.source.index('mktemp -d'),
+                 self.source.index('git --git-dir="$CACHE" archive'),
+                 self.source.index('python3 -I -B "$WORK/derive.py"'),
+                 self.source.index('check_disk "before anything is copied or built"'),
+                 self.source.index('stale="$(docker ps'),
                  self.source.index('docker build --quiet'),
                  self.source.index('CREATE DATABASE'),
                  self.source.index('check_disk "before the restore"'),
-                 self.source.index('pg_dump -U')]
+                 self.source.index('pg_dump -U "$PG_USER" -d "$PG_PRODUCTION_DB" -s')]
         self.assertEqual(order, sorted(order))
         self.assertEqual(self.source.count('check_disk "'), 2)
 
@@ -203,6 +220,135 @@ def msys(path):
     return text
 
 
+GIB = 1024 ** 3
+DERIVE_SOURCE = (ROOT / 'scripts/relay_migration_dryrun_remote.sh').read_text(encoding='utf-8')
+
+
+def derive_program():
+    match = re.search(r"<<'DERIVE'\n(.*?)\nDERIVE\n", DERIVE_SOURCE, re.S)
+    assert match, 'the DERIVE program is missing'
+    return match.group(1) + '\n'
+
+
+def migration(revision, down, body):
+    return f'"""fixture migration"""\n\nrevision = "{revision}"\ndown_revision = "{down}"\n\n{body}\n'
+
+
+# The four revisions, shaped as the approved commit's files are (statements and a prose mention of "runs").
+FIXTURE_MIGRATIONS = {
+    '20261126120000_phone_simple.py': migration(
+        'x20261126_phone_simple', 'w20261031_usage_turn_ts',
+        'DDL = ["ALTER TABLE phone_chat_event ADD COLUMN recipients_json TEXT"]'),
+    '20261126150000_receipts_owner_fk.py': migration(
+        'a20261126_receipts_owner', 'x20261126_phone_simple',
+        'DROP = ["ALTER TABLE link_state_admission DROP CONSTRAINT IF EXISTS link_state_admission_owner_uid_fkey"]\n'
+        'RESTORE = ["ALTER TABLE link_state_admission ADD CONSTRAINT k FOREIGN KEY (owner_uid) '
+        'REFERENCES link_account_chain(owner_uid) NOT VALID"]'),
+    '20261126160000_chain_devices_to_account_rows.py': migration(
+        'b20261126_chain_import', 'a20261126_receipts_owner',
+        'SQL = "SELECT owner_uid, chain_json, account_revoked_json FROM link_account_chain WHERE owner_uid > :after"\n'
+        'INS = "INSERT INTO account_devices (owner_uid, device_id) SELECT o, d FROM unnest(:o) AS v(o, d)"\n'
+        'OWN = "INSERT INTO account_device_owner (owner_uid, revision) VALUES (:o, 0)"\n'
+        'RESCOPE = "UPDATE phone_push_subscription SET chain_id = \'account\' WHERE chain_id IS DISTINCT FROM \'account\'"\n'
+        '"""Every statement runs under this revision\'s lock_timeout; each revision commits separately."""'),
+    '20261126170000_sign_out_everywhere.py': migration(
+        'c20261126_sign_out_everywhere', 'b20261126_chain_import',
+        'DDL = ["ALTER TABLE account_device_owner ADD COLUMN IF NOT EXISTS sessions_revoked_at BIGINT"]'),
+}
+
+# Production's public tables as pg_class reports them: name, total size in bytes, planner estimate.
+FIXTURE_INVENTORY = [
+    ('account_devices', 1 * GIB, 100), ('account_device_owner', 1 * GIB, 100),
+    ('link_account_chain', 1 * GIB, 100), ('phone_push_subscription', 1 * GIB, 100),
+    ('link_state_admission', 1 * GIB, 100), ('alembic_version', 8192, 1),
+    ('phone_chat_event', 50 * GIB, 900000), ('relay_events', 60 * GIB, 9000000),
+    ('runs', 40 * GIB, 500000),
+]
+
+
+def inventory_text(rows=FIXTURE_INVENTORY):
+    return ''.join(f'{name}\t{size}\t{estimate}\n' for name, size, estimate in rows)
+
+
+def write_fixture_tree(root, migrations=FIXTURE_MIGRATIONS):
+    versions = root / 'alembic' / 'versions'
+    versions.mkdir(parents=True)
+    for name, text in migrations.items():
+        (versions / name).write_text(text, encoding='utf-8', newline='\n')
+    return root
+
+
+class DeriveTests(unittest.TestCase):
+    """The selection comes from the statements in the approved commit's own revisions."""
+
+    def derive(self, migrations=FIXTURE_MIGRATIONS, inventory=None, start='w20261031_usage_turn_ts',
+               head='c20261126_sign_out_everywhere'):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            tree = write_fixture_tree(tmp / 'src', migrations)
+            table_file = tmp / 'inventory.tsv'
+            table_file.write_text(inventory if inventory is not None else inventory_text(), encoding='utf-8')
+            out = tmp / 'out'
+            out.mkdir()
+            program = tmp / 'derive.py'
+            program.write_text(derive_program(), encoding='utf-8', newline='\n')
+            result = subprocess.run([sys.executable, '-I', '-B', str(program), str(tree), start, head,
+                                     str(table_file), str(out)], capture_output=True, text=True, timeout=120)
+            files = {p.name: p.read_text(encoding='utf-8') for p in out.iterdir()}
+        return result, files
+
+    def test_selects_the_tables_the_statements_read_or_write_and_the_verifier_reads(self):
+        result, files = self.derive()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(files['data-tables.txt'].split(), [
+            'account_device_owner', 'account_devices', 'alembic_version', 'link_account_chain',
+            'link_state_admission', 'phone_push_subscription'])
+        self.assertEqual(files['schema-tables.tsv'], 'phone_chat_event\t53687091200\t900000\n')
+        self.assertEqual(files['selected-bytes.txt'], str(5 * GIB + 8192))
+        self.assertIn('"prose_only_not_copied": ["runs"]', files['plan.json'])
+
+    def test_a_table_only_named_in_prose_is_not_copied(self):
+        result, files = self.derive()
+        self.assertNotIn('runs', files['data-tables.txt'].split())
+        self.assertNotIn('runs', files['schema-tables.tsv'])
+        self.assertIn('named only in comments or docstrings, not copied: runs', result.stdout)
+
+    def test_a_table_name_built_at_run_time_refuses_the_selection(self):
+        migrations = dict(FIXTURE_MIGRATIONS)
+        migrations['20261126170000_sign_out_everywhere.py'] = migration(
+            'c20261126_sign_out_everywhere', 'b20261126_chain_import',
+            'DDL = [f"ALTER TABLE {name} ADD COLUMN x TEXT"]')
+        result, _ = self.derive(migrations=migrations)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('builds a table name at run time', result.stderr)
+
+    def test_an_alter_of_a_table_production_does_not_have_refuses_the_selection(self):
+        migrations = dict(FIXTURE_MIGRATIONS)
+        migrations['20261126120000_phone_simple.py'] = migration(
+            'x20261126_phone_simple', 'w20261031_usage_turn_ts', 'DDL = ["ALTER TABLE ghost_table ADD COLUMN x TEXT"]')
+        result, _ = self.derive(migrations=migrations)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('alters a table production does not have', result.stderr)
+
+    def test_a_head_that_does_not_descend_from_the_start_refuses_the_selection(self):
+        result, _ = self.derive(start='not_a_revision_of_this_chain')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('does not descend', result.stderr)
+
+    def test_a_missing_verifier_table_refuses_the_selection(self):
+        rows = [row for row in FIXTURE_INVENTORY if row[0] != 'link_account_chain']
+        result, _ = self.derive(inventory=inventory_text(rows))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('the verifier cannot run', result.stderr)
+
+    def test_a_malformed_inventory_refuses_the_selection(self):
+        result, _ = self.derive(inventory='account_devices\tnot-a-size\t1\n')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('non-numeric size', result.stderr)
+
+
+# Stub commands for the VM program. Every production read goes through the stubbed docker exec, so the tests can
+# check which statements reach production and what they answer.
 STUB_DOCKER = r'''#!/usr/bin/env bash
 echo "docker $*" >> "$STUB_LOG"
 case "$1" in
@@ -219,7 +365,11 @@ case "$1" in
     case "$*" in
       *printenv*) echo stub-password ;;
       *pg_restore*) cat > /dev/null ;;
+      *pg_dump*) : ;;
+      *server_version*) echo "17.0 (170000)" ;;
       *pg_database_size*) echo "$STUB_DB_SIZE" ;;
+      *pg_class*) cat "$STUB_INVENTORY" ;;
+      *count\(\**) echo "$STUB_COUNT" ;;
       *" df "*)
         n=$(cat "$STUB_LOG.df" 2>/dev/null || echo 0)
         n=$((n + 1))
@@ -253,7 +403,7 @@ STUB_GIT = r'''#!/usr/bin/env bash
 echo "git $*" >> "$STUB_LOG"
 case "$*" in
   *rev-parse*) echo "$DRYRUN_REVISION" ;;
-  *archive*) tar -cf - -T /dev/null ;;
+  *archive*) tar -C "$STUB_ARCHIVE" -cf - . ;;
 esac
 exit 0
 '''
@@ -270,15 +420,15 @@ def write_stub(path, body):
     os.chmod(path, 0o755)
 
 
-GIB = 1024 ** 3
-# A healthy host: an 8 GiB database needs 2 x 8 + 3 = 19 GiB free on the data volume, and 6 GiB under Docker.
+# A healthy host. The selection is 5 GiB, so the data volume needs 2 x 5 + 3 = 13 GiB, and the Docker root 6 GiB.
 HEALTHY = {
-    'STUB_DB_SIZE': str(8 * GIB),
+    'STUB_DB_SIZE': str(120 * GIB),
     'STUB_CONTAINER_FREE': str(40 * GIB),
     'STUB_HOST_FREE': str(40 * GIB),
     'STUB_DOCKER_FREE': str(40 * GIB),
     'STUB_VOLUME_MOUNT': '/srv/stub-volume/_data',
     'STUB_DOCKER_ROOT': '/srv/stub-docker-root',
+    'STUB_COUNT': '1234',
 }
 
 
@@ -291,7 +441,7 @@ class VmRun:
         self.leftovers = leftovers
 
 
-def run_vm_program(**overrides):
+def run_vm_program(migrations=FIXTURE_MIGRATIONS, inventory=None, **overrides):
     """Run the real VM program with stub docker, df, git, timeout and python3 on PATH."""
     bash = find_bash()
     if bash is None:
@@ -302,7 +452,10 @@ def run_vm_program(**overrides):
         tmp = Path(tmp)
         stubs = tmp / 'bin'
         stubs.mkdir()
-        state = tmp / 'state'  # not created here: the program must create it, or not
+        archive = write_fixture_tree(tmp / 'archive', migrations)
+        inventory_file = tmp / 'inventory.tsv'
+        inventory_file.write_text(inventory if inventory is not None else inventory_text(), encoding='utf-8')
+        state = tmp / 'state'  # not created here: the program creates it, and removes its work directory
         log = tmp / 'calls.log'
         log.write_text('', encoding='utf-8')
         write_stub(stubs / 'docker', STUB_DOCKER)
@@ -320,37 +473,77 @@ def run_vm_program(**overrides):
             'GH_PULL_TOKEN': TOKEN,
             'RELAY_DRYRUN_STATE': msys(state),
             'STUB_LOG': msys(log),
+            'STUB_ARCHIVE': msys(archive),
+            'STUB_INVENTORY': msys(inventory_file),
         }
         env.update(values)
         # Prepend the stubs inside bash, then source the program in that same shell: Git Bash puts its own tool
         # directories ahead of any inherited PATH, including when a second bash starts.
         launch = 'PATH="$STUB_DIR:$PATH"; export PATH; . "$PROGRAM"'
-        result = subprocess.run([bash, '-c', launch], env=env, capture_output=True, text=True, timeout=120)
+        result = subprocess.run([bash, '-c', launch], env=env, capture_output=True, text=True, timeout=300)
         calls = log.read_text(encoding='utf-8')
         state_created = state.exists()
         leftovers = list(state.glob('run.*')) if state_created else []
     return VmRun(result.returncode, result.stdout + result.stderr, calls, state_created, leftovers)
 
 
-class FailedMigrationStillDropsTheCopyTests(unittest.TestCase):
-    def test_a_failed_migration_drops_the_copy_and_keeps_the_login_out_of_every_output(self):
+class SelectiveCopyTests(unittest.TestCase):
+    def test_the_whole_schema_is_copied_and_only_the_selected_rows_are(self):
         run = run_vm_program()
+        self.assertIn('pg_dump -U user -d aegra -s -Fc --no-owner --no-acl', run.calls)
+        data_dump = [line for line in run.calls.splitlines() if 'pg_dump -U user -d aegra -a' in line]
+        self.assertEqual(len(data_dump), 1, run.calls)
+        for table in ('account_devices', 'account_device_owner', 'link_account_chain',
+                      'phone_push_subscription', 'link_state_admission', 'alembic_version'):
+            self.assertIn(f'-t public.{table}', data_dump[0])
+        for table in ('phone_chat_event', 'relay_events', 'runs'):
+            self.assertNotIn(f'-t public.{table}', data_dump[0])
+        self.assertIn('-a --disable-triggers --no-owner --no-acl --exit-on-error', run.calls)
+
+    def test_the_schema_only_table_is_reported_with_its_production_rows_and_size(self):
+        run = run_vm_program()
+        self.assertIn('phone_chat_event: production rows 1234; total size 50.00 GiB', run.output)
+        self.assertIn('schema-only tables: phone_chat_event', run.output)
+
+    def test_a_count_that_cannot_be_read_is_reported_as_not_read_never_as_zero(self):
+        run = run_vm_program(STUB_COUNT='')
+        self.assertIn('phone_chat_event: production rows not read', run.output)
+        self.assertNotIn('phone_chat_event: production rows 0', run.output)
+
+    def test_every_production_read_is_read_only_and_no_write_reaches_production(self):
+        run = run_vm_program()
+        production = [line for line in run.calls.splitlines()
+                      if '-d aegra' in line and 'pg_dump' not in line]
+        self.assertTrue(production, run.calls)
+        for line in production:
+            self.assertIn('SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY', line)
+            self.assertIsNone(re.search(r'INSERT INTO|UPDATE |DELETE FROM|ALTER TABLE|DROP TABLE|CREATE TABLE|TRUNCATE',
+                                        line), line)
+
+    def test_the_selection_is_refused_above_the_ceiling_before_anything_is_created(self):
+        rows = [(name, 25 * GIB if name == 'account_devices' else size, est)
+                for name, size, est in FIXTURE_INVENTORY]
+        run = run_vm_program(inventory=inventory_text(rows))
         self.assertNotEqual(run.returncode, 0, run.output)
-        created = re.search(r'CREATE DATABASE \\?"?(relay_migration_dryrun_\d{14})', run.calls)
-        self.assertIsNotNone(created, run.calls + run.output)
-        copy = created.group(1)
-        self.assertIn(f'DROP DATABASE IF EXISTS "{copy}"', run.calls)
-        self.assertLess(run.calls.index('alembic upgrade head'), run.calls.index('DROP DATABASE'))
-        self.assertIn('docker rm -f relay-dryrun-alembic', run.calls)
-        self.assertIn(f'docker image rm -f relay-migration-dryrun:{REVISION[:12]}', run.calls)
+        self.assertIn('above the 20.00 GiB ceiling', run.output)
+        self.assertNotIn('CREATE DATABASE', run.calls)
+        self.assertNotIn('docker build', run.calls)
+        self.assertNotIn('pg_dump', run.calls)
         self.assertEqual(run.leftovers, [], 'the work directory must be removed')
-        combined = run.output + run.calls
-        self.assertNotIn(TOKEN, combined)
-        self.assertNotIn('stub-password', combined)
+
+    def test_a_derivation_that_fails_refuses_the_run_before_anything_is_copied(self):
+        migrations = dict(FIXTURE_MIGRATIONS)
+        migrations['20261126120000_phone_simple.py'] = migration(
+            'x20261126_phone_simple', 'w20261031_usage_turn_ts', 'DDL = [f"ALTER TABLE {name} ADD COLUMN x TEXT"]')
+        run = run_vm_program(migrations=migrations)
+        self.assertNotEqual(run.returncode, 0, run.output)
+        self.assertIn('could not be derived', run.output)
+        self.assertNotIn('CREATE DATABASE', run.calls)
+        self.assertNotIn('docker build', run.calls)
 
 
 class DiskGuardTests(unittest.TestCase):
-    """The copy doubles production's data on the same volume, and the build writes under the Docker root."""
+    """The copy holds the selected data again on the same volume, and the build writes under the Docker root."""
 
     def assert_refused_before_anything_was_created(self, run, expected):
         self.assertNotEqual(run.returncode, 0, run.output)
@@ -359,18 +552,18 @@ class DiskGuardTests(unittest.TestCase):
         self.assertNotIn('CREATE DATABASE', run.calls)
         self.assertNotIn('docker build', run.calls)
         self.assertNotIn('pg_dump', run.calls)
-        self.assertNotIn('git ', run.calls)
-        self.assertFalse(run.state_created, 'the state directory must not be created on a refusal')
+        self.assertEqual(run.leftovers, [], 'the work directory must be removed')
 
     def test_refuses_when_the_data_volume_is_short_in_the_container_and_creates_nothing(self):
-        # 2 x 8 GiB + 3 GiB = 19 GiB needed; the container reports 18 GiB free.
-        run = run_vm_program(STUB_CONTAINER_FREE=str(18 * GIB))
-        self.assert_refused_before_anything_was_created(run, 'in the container 18.00 GiB')
-        self.assertIn('(8.00 GiB)', run.output)
+        # 2 x 5 GiB + 3 GiB = 13 GiB needed; the container reports 12 GiB free.
+        run = run_vm_program(STUB_CONTAINER_FREE=str(12 * GIB))
+        self.assert_refused_before_anything_was_created(run, 'in the container 12.00 GiB')
+        self.assertIn('data volume needs 13.00 GiB', run.output)
+        self.assertIn('selected data 5368717312 bytes (5.00 GiB)', run.output)
 
     def test_refuses_when_the_data_volume_is_short_on_the_vm_even_if_the_container_agrees(self):
-        run = run_vm_program(STUB_HOST_FREE=str(18 * GIB))
-        self.assert_refused_before_anything_was_created(run, 'on the VM 18.00 GiB')
+        run = run_vm_program(STUB_HOST_FREE=str(12 * GIB))
+        self.assert_refused_before_anything_was_created(run, 'on the VM 12.00 GiB')
 
     def test_refuses_when_the_docker_root_has_less_than_6_GiB_free(self):
         run = run_vm_program(STUB_DOCKER_FREE=str(5 * GIB))
@@ -382,11 +575,10 @@ class DiskGuardTests(unittest.TestCase):
         self.assertNotEqual(run.returncode, 0, run.output)
         self.assertIn('could not read the production database size', run.output)
         self.assertNotIn('CREATE DATABASE', run.calls)
-        self.assertFalse(run.state_created)
 
     def test_the_recheck_before_the_restore_drops_the_copy_and_never_restores(self):
-        # The first check (before anything) passes with 40 GiB; the recheck after the copy is created sees 15 GiB.
-        run = run_vm_program(STUB_CONTAINER_FREE_LATER=str(15 * GIB))
+        # The first check (before anything) passes with 40 GiB; the recheck after the copy is created sees 12 GiB.
+        run = run_vm_program(STUB_CONTAINER_FREE_LATER=str(12 * GIB))
         self.assertNotEqual(run.returncode, 0, run.output)
         self.assertIn('refusing (before the restore)', run.output)
         self.assertIn('the copy is dropped', run.output)
@@ -405,6 +597,36 @@ class DiskGuardTests(unittest.TestCase):
         # The stub migration fails on purpose, so the run ends there, after the copy was dropped.
         self.assertIn('alembic upgrade head', run.calls)
         self.assertIn('DROP DATABASE', run.calls)
+
+
+class PhaseTimingTests(unittest.TestCase):
+    def test_each_phase_prints_its_time(self):
+        run = run_vm_program()
+        for phase in ('phase fetch:', 'phase production inventory:', 'phase schema copy',
+                      'phase data copy', 'phase drop:'):
+            self.assertIn(phase, run.output)
+
+    def test_a_failed_migration_still_prints_the_drop_time(self):
+        run = run_vm_program()
+        self.assertNotEqual(run.returncode, 0, run.output)
+        self.assertIn('phase drop:', run.output)
+
+
+class FailedMigrationStillDropsTheCopyTests(unittest.TestCase):
+    def test_a_failed_migration_drops_the_copy_and_keeps_the_login_out_of_every_output(self):
+        run = run_vm_program()
+        self.assertNotEqual(run.returncode, 0, run.output)
+        created = re.search(r'CREATE DATABASE \\?"?(relay_migration_dryrun_\d{14})', run.calls)
+        self.assertIsNotNone(created, run.calls + run.output)
+        copy = created.group(1)
+        self.assertIn(f'DROP DATABASE IF EXISTS "{copy}"', run.calls)
+        self.assertLess(run.calls.index('alembic upgrade head'), run.calls.index('DROP DATABASE'))
+        self.assertIn('docker rm -f relay-dryrun-alembic', run.calls)
+        self.assertIn(f'docker image rm -f relay-migration-dryrun:{REVISION[:12]}', run.calls)
+        self.assertEqual(run.leftovers, [], 'the work directory must be removed')
+        combined = run.output + run.calls
+        self.assertNotIn(TOKEN, combined)
+        self.assertNotIn('stub-password', combined)
 
 
 if __name__ == '__main__':
