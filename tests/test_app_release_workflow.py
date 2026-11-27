@@ -1,4 +1,6 @@
+import copy
 from pathlib import Path
+import re
 import unittest
 
 import yaml
@@ -7,6 +9,53 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = yaml.safe_load((ROOT / ".github/workflows/release-app.yml").read_text())
 BUILDS = {"build-windows": ("windows-2022", "windows-amd64"), "build-macos": ("macos-15", "darwin-arm64")}
 APPLE_SECRETS = ("CSC_LINK", "CSC_KEY_PASSWORD", "APPLE_API_KEY", "APPLE_API_KEY_ID", "APPLE_API_ISSUER")
+PUBLIC_READ_STEP = "Bind only the expected downloadable assets to this source commit"
+PUBLIC_READ_ENV = {"APP_ASSET_DIR", "APP_RELEASE_REPOSITORY", "PUBLIC_READ_TOKEN"}
+GITHUB_TOKEN_REF = "${{ github.token }}"
+
+
+def leaves(node, path=()):
+    """Every scalar in the parsed workflow, with the path of keys and indexes that holds it."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            yield from leaves(value, path + (key,))
+    elif isinstance(node, list):
+        for index, value in enumerate(node):
+            yield from leaves(value, path + (index,))
+    else:
+        yield path, str(node)
+
+
+def github_token_locations(workflow):
+    """The path of every key or value that names the job's GITHUB_TOKEN."""
+    return [path for path, value in leaves(workflow)
+            if re.search(r"github\.token|GITHUB_TOKEN", " ".join(map(str, path)) + " " + value, re.IGNORECASE)]
+
+
+def public_read_step(workflow):
+    steps = workflow["jobs"]["build-windows"]["steps"]
+    index = next(i for i, step in enumerate(steps) if step.get("name") == PUBLIC_READ_STEP)
+    return index, steps[index]
+
+
+def github_token_violations(workflow):
+    """The placement rules for the job's GITHUB_TOKEN. An empty list means the workflow obeys them."""
+    violations = []
+    if workflow.get("permissions") != {"contents": "read"}:
+        violations.append("top-level permissions are not contents: read")
+    for name, job in workflow["jobs"].items():
+        if "permissions" in job:
+            violations.append(f"{name} sets its own permissions, which can widen the token")
+    index, step = public_read_step(workflow)
+    expected = [("jobs", "build-windows", "steps", index, "env", "PUBLIC_READ_TOKEN")]
+    found = github_token_locations(workflow)
+    if found != expected:
+        violations.append(f"GITHUB_TOKEN appears at {found}, not only at {expected}")
+    if set(step) != {"name", "env", "run"} or "stage --platform windows-amd64" not in step["run"]:
+        violations.append("the public-read step carries inputs beyond its env and staging command")
+    if set(step.get("env", {})) != PUBLIC_READ_ENV or step["env"]["PUBLIC_READ_TOKEN"] != GITHUB_TOKEN_REF:
+        violations.append("the public-read step's env is not exactly the public-read inputs")
+    return violations
 
 
 class AppWorkflowTests(unittest.TestCase):
@@ -126,6 +175,66 @@ class AppWorkflowTests(unittest.TestCase):
         self.assertEqual(text.count("repositories: aios-desktop-app"), 2)
         for name in ("aios-companion-releases", "aiosxaegra", "companion-memory"):
             self.assertNotIn(name, text)
+
+    def test_the_windows_stage_step_names_the_destination_and_holds_only_the_job_read_token(self):
+        # Staging copies the newest published receipt of a generation the archive misses. It reads the public destination
+        # with the job's own read-only token, which cannot write there. The publisher token never reaches this step.
+        _, stage = public_read_step(WORKFLOW)
+        self.assertIn("stage --platform windows-amd64", stage["run"])
+        self.assertEqual(stage["env"]["APP_RELEASE_REPOSITORY"], "${{ needs.identity.outputs.release_repository }}")
+        self.assertEqual(stage["env"]["PUBLIC_READ_TOKEN"], GITHUB_TOKEN_REF)
+        self.assertNotIn("PUBLISH_RELEASES_TOKEN", str(stage))
+        self.assertNotIn("GH_TOKEN", stage["env"])
+
+    def test_the_job_token_is_placed_only_in_the_windows_public_read_step(self):
+        # Control: the shipped placement passes every rule, so each mutant below fails for its own change alone.
+        self.assertEqual(github_token_violations(WORKFLOW), [])
+
+    def test_mutants_of_the_job_token_placement_are_each_refused(self):
+        def set_env(job, step_name, key, value):
+            def change(workflow):
+                step = next(step for step in workflow["jobs"][job]["steps"] if step.get("name") == step_name)
+                step.setdefault("env", {})[key] = value
+            return change
+
+        def set_job_env(job, key, value):
+            def change(workflow):
+                workflow["jobs"][job].setdefault("env", {})[key] = value
+            return change
+
+        def add_with_token(job, step_name):
+            def change(workflow):
+                step = next(step for step in workflow["jobs"][job]["steps"] if step.get("name") == step_name)
+                step["with"] = {"token": GITHUB_TOKEN_REF}
+            return change
+
+        def set_permissions(job_or_none, value):
+            def change(workflow):
+                if job_or_none is None:
+                    workflow["permissions"] = value
+                else:
+                    workflow["jobs"][job_or_none]["permissions"] = value
+            return change
+
+        publish = "Publish only verified assets to the unpublished new-app draft"
+        mutants = {
+            "job token also as GH_TOKEN on the Windows stage step": set_env("build-windows", PUBLIC_READ_STEP, "GH_TOKEN", GITHUB_TOKEN_REF),
+            "job token on the macOS stage step": set_env("build-macos", PUBLIC_READ_STEP, "PUBLIC_READ_TOKEN", GITHUB_TOKEN_REF),
+            "job token on the Windows upload step": set_env("build-windows", publish, "PUBLIC_READ_TOKEN", GITHUB_TOKEN_REF),
+            "job token at job level": set_job_env("build-windows", "PUBLIC_READ_TOKEN", GITHUB_TOKEN_REF),
+            "job token under a second name on the stage step": set_env("build-windows", PUBLIC_READ_STEP, "GITHUB_TOKEN", GITHUB_TOKEN_REF),
+            "publisher secret beside the public read": set_env("build-windows", PUBLIC_READ_STEP, "GH_TOKEN", "${{ secrets.PUBLISH_RELEASES_TOKEN }}"),
+            "publisher secret as the public read token": set_env("build-windows", PUBLIC_READ_STEP, "PUBLIC_READ_TOKEN", "${{ secrets.PUBLISH_RELEASES_TOKEN }}"),
+            "app token beside the public read": set_env("build-windows", PUBLIC_READ_STEP, "BUILDER_TOKEN", "${{ steps.source-token.outputs.token }}"),
+            "job token given to a checkout as an input": add_with_token("build-windows", "Check out the pinned bundled MCP source"),
+            "write permission on the Windows job": set_permissions("build-windows", {"contents": "write"}),
+            "write permission at top level": set_permissions(None, {"contents": "write"}),
+        }
+        for name, change in mutants.items():
+            with self.subTest(mutant=name):
+                workflow = copy.deepcopy(WORKFLOW)
+                change(workflow)
+                self.assertTrue(github_token_violations(workflow), "the audit accepted this mutant")
 
     def test_dispatch_inputs_never_become_shell_text(self):
         for job in WORKFLOW["jobs"].values():
