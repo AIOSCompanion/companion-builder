@@ -1,0 +1,242 @@
+"""The bridge e2e's checks, on fake folders and registry entries, and the workflow's order and gating.
+
+The Windows run itself happens only on the runner (scripts/bridge_e2e.py). These tests pin what each check accepts and refuses,
+so a check that would pass a broken install is caught here.
+"""
+import contextlib
+import json
+import os
+from pathlib import Path
+import sqlite3
+import sys
+import tempfile
+import time
+import unittest
+
+import yaml
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+import bridge_e2e  # noqa: E402
+from bridge_e2e import (BRIDGE_UNINSTALL_GUID, IMPORT_FINISHED, check_feed_served, check_import_pending,  # noqa: E402
+                        check_old_app_gone, check_old_data_detected, check_stable_install, check_uninstall,
+                        check_update_path, point_feed_at, seed_old_data, seed_paths)
+
+VERSION = "0.19.5"
+INSTALLER = "Companion-Setup-x64-0.19.5.exe"
+
+
+class PointFeedTests(unittest.TestCase):
+    def test_the_installed_feed_moves_to_the_local_generic_server_and_keeps_other_keys(self):
+        before = ("owner: AIOSCompanion\nrepo: aios-companion-releases\nprovider: github\n"
+                  "updaterCacheDirName: companion-updater\n")
+        after = point_feed_at(before, "http://127.0.0.1:50123")
+        self.assertIn("provider: generic\n", after)
+        self.assertIn("url: http://127.0.0.1:50123\n", after)
+        self.assertNotIn("provider: github", after)
+        self.assertNotIn("owner:", after)
+        self.assertNotIn("repo:", after)
+        self.assertIn("updaterCacheDirName: companion-updater", after)
+
+    def test_only_a_loopback_feed_is_accepted(self):
+        with self.assertRaises(bridge_e2e.E2EError):
+            point_feed_at("provider: github\n", "https://example.com")
+
+
+class SeedTests(unittest.TestCase):
+    def test_the_seed_is_written_where_the_engine_looks_and_is_detected(self):
+        with tempfile.TemporaryDirectory() as roaming:
+            self.assertFalse(check_old_data_detected(Path(roaming))[0])
+            seed_old_data(Path(roaming))
+            events, companion = seed_paths(Path(roaming))
+            self.assertEqual(events.parts[-3:], ("aegra-local", "eventlog", "events.db"))
+            self.assertEqual(companion.parts[-2:], ("aegra-local", "companion.db"))
+            self.assertTrue(check_old_data_detected(Path(roaming))[0])
+            with contextlib.closing(sqlite3.connect(events)) as db:
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM events").fetchone()[0], 1)
+
+    def test_detection_needs_the_event_log_the_importer_looks_for(self):
+        with tempfile.TemporaryDirectory() as roaming:
+            seed_old_data(Path(roaming))
+            events, _ = seed_paths(Path(roaming))
+            events.unlink()
+            self.assertFalse(check_old_data_detected(Path(roaming))[0])
+
+
+class StableInstallTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.stable = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def write_receipt(self, version):
+        (self.stable / "companion-install.json").write_text(json.dumps({"schema": 1, "version": version, "files": {}}))
+
+    def test_a_receipt_and_the_cli_both_at_the_bridge_version_pass(self):
+        self.write_receipt(VERSION)
+        self.assertTrue(check_stable_install(self.stable, VERSION, VERSION + "\n")[0])
+
+    def test_an_old_receipt_fails(self):
+        self.write_receipt("0.18.0")
+        self.assertFalse(check_stable_install(self.stable, VERSION, None)[0])
+
+    def test_a_missing_receipt_fails(self):
+        self.assertFalse(check_stable_install(self.stable, VERSION, None)[0])
+
+    def test_a_cli_reporting_another_version_fails_even_with_a_matching_receipt(self):
+        self.write_receipt(VERSION)
+        self.assertFalse(check_stable_install(self.stable, VERSION, "0.18.0\n")[0])
+
+    def test_old_program_files_at_the_stable_path_fail_the_old_app_gone_check(self):
+        (self.stable / "Uninstall Companion.exe").write_text("x")
+        self.assertFalse(check_old_app_gone(self.stable)[0])
+        (self.stable / "Uninstall Companion.exe").unlink()
+        self.assertTrue(check_old_app_gone(self.stable)[0])
+
+
+def entry(version, location, uninstall="\"C:\\x\\Companion.exe\" --uninstall", name="Companion"):
+    return {"DisplayName": name, "DisplayVersion": version, "InstallLocation": location, "UninstallString": uninstall}
+
+
+class UninstallTests(unittest.TestCase):
+    STABLE = Path(r"C:\Users\u\AppData\Local\Programs\Companion")
+
+    def test_the_bridge_entry_alone_passes(self):
+        entries = [(BRIDGE_UNINSTALL_GUID, entry(VERSION, str(self.STABLE)))]
+        self.assertTrue(check_uninstall(entries, VERSION, self.STABLE)[0])
+
+    def test_a_key_still_naming_the_old_version_fails(self):
+        entries = [(BRIDGE_UNINSTALL_GUID, entry("0.18.0", str(self.STABLE)))]
+        self.assertFalse(check_uninstall(entries, VERSION, self.STABLE)[0])
+
+    def test_a_second_companion_entry_fails(self):
+        entries = [(BRIDGE_UNINSTALL_GUID, entry(VERSION, str(self.STABLE))),
+                   ("{OLD-GUID}", entry("0.18.0", str(self.STABLE)))]
+        ok, detail = check_uninstall(entries, VERSION, self.STABLE)
+        self.assertFalse(ok)
+        self.assertIn("another Companion entry", detail)
+
+    def test_a_missing_bridge_key_fails(self):
+        self.assertFalse(check_uninstall([], VERSION, self.STABLE)[0])
+
+    def test_an_uninstall_string_without_the_uninstall_switch_fails(self):
+        entries = [(BRIDGE_UNINSTALL_GUID, entry(VERSION, str(self.STABLE), uninstall='"C:\\x\\Companion.exe"'))]
+        self.assertFalse(check_uninstall(entries, VERSION, self.STABLE)[0])
+
+
+class UpdatePathTests(unittest.TestCase):
+    GOOD = ('start: args=["--updated"]\ninstall version 0.19.5 into X\ninstall complete: 0.19.5\nexit 0\n')
+
+    def test_a_bridge_started_by_the_updater_that_finished_with_exit_zero_passes(self):
+        self.assertTrue(check_update_path(self.GOOD)[0])
+
+    def test_a_run_without_updated_fails(self):
+        self.assertFalse(check_update_path(self.GOOD.replace("--updated", "--other"))[0])
+
+    def test_a_failed_run_fails(self):
+        text = 'start: args=["--updated"]\nexit 4: the install failed\n'
+        self.assertFalse(check_update_path(text)[0])
+
+
+class FeedTests(unittest.TestCase):
+    def test_the_update_needs_both_the_feed_and_the_installer_fetched(self):
+        ok = [("/latest.yml", "200"), ("/" + INSTALLER, "200")]
+        self.assertTrue(check_feed_served(ok, INSTALLER)[0])
+        self.assertFalse(check_feed_served([("/latest.yml", "200")], INSTALLER)[0])
+        self.assertFalse(check_feed_served([("/" + INSTALLER, "200")], INSTALLER)[0])
+        self.assertFalse(check_feed_served([("/latest.yml", "404"), ("/" + INSTALLER, "200")], INSTALLER)[0])
+
+
+class ImportPendingTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name) / "companion-engine"
+        self.home.mkdir()
+        self.kept = Path(self.tmp.name) / "Companion.takeover-previous-abc"
+        self.kept.mkdir()
+        self.record = self.home / "takeover-previous.json"
+        self.record.write_text(json.dumps({"version": 1, "installs": [{"install_dir": "x", "previous": str(self.kept)}]}))
+        self.launched = time.time() - 5
+        (self.home / "engine.log").write_text("started\n")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_check(self, logs="started\n", old_data=True):
+        return check_import_pending(self.home, self.launched, self.record, old_data, logs)
+
+    def test_no_finish_line_with_the_previous_folder_and_data_kept_is_pending(self):
+        ok, detail = self.run_check()
+        self.assertTrue(ok)
+        self.assertIn("pending", detail)
+
+    def test_a_finish_line_fails_because_the_runner_cannot_sign_in(self):
+        self.assertFalse(self.run_check(logs=f"{IMPORT_FINISHED} status=ok\n")[0])
+
+    def test_a_removed_previous_folder_fails(self):
+        self.kept.rmdir()
+        self.assertFalse(self.run_check()[0])
+
+    def test_removed_previous_data_fails(self):
+        self.assertFalse(self.run_check(old_data=False)[0])
+
+    def test_an_engine_that_wrote_nothing_after_launch_fails(self):
+        self.launched = time.time() + 60
+        self.assertFalse(self.run_check()[0])
+
+
+class WorkflowTests(unittest.TestCase):
+    WORKFLOW = yaml.safe_load((ROOT / ".github/workflows/bridge-release.yml").read_text(encoding="utf-8"))
+    JOB = WORKFLOW["jobs"]["bridge-windows"]
+
+    def steps(self):
+        return self.JOB["steps"]
+
+    def index(self, predicate):
+        return next(i for i, step in enumerate(self.steps()) if predicate(step))
+
+    def test_the_job_env_names_no_runner_context(self):
+        self.assertNotIn("runner.", str(self.JOB.get("env", {})))
+
+    def test_the_run_folders_are_exported_to_the_later_steps(self):
+        export = self.steps()[self.index(lambda s: "BRIDGE_OUT_DIR=" in s.get("run", ""))]["run"]
+        for name in ("BRIDGE_INPUT_DIR", "BRIDGE_OUT_DIR", "E2E_OUT_DIR"):
+            self.assertIn(f"{name}=", export)
+
+    def test_the_e2e_runs_after_the_build_and_before_the_draft(self):
+        build = self.index(lambda s: 'bridge_release.py" build' in s.get("run", ""))
+        e2e = self.index(lambda s: "bridge_e2e.py" in s.get("run", ""))
+        draft = self.index(lambda s: 'bridge_release.py" draft' in s.get("run", ""))
+        self.assertLess(build, e2e)
+        self.assertLess(e2e, draft)
+
+    def test_the_e2e_is_sealed_and_holds_no_publishing_credential(self):
+        step = self.steps()[self.index(lambda s: "bridge_e2e.py" in s.get("run", ""))]
+        self.assertIn("run_sealed.py", step["run"])
+        self.assertIn("--seal-dir", step["run"])
+        self.assertNotIn("PUBLISH_RELEASES_TOKEN", str(step.get("env", {})))
+        self.assertNotIn("BUILDER_APP_PRIVATE_KEY", str(step.get("env", {})))
+
+    def test_the_draft_has_no_condition_so_it_runs_only_after_a_passing_e2e(self):
+        draft = self.steps()[self.index(lambda s: 'bridge_release.py" draft' in s.get("run", ""))]
+        self.assertNotIn("if", draft)
+        self.assertNotIn("continue-on-error", draft)
+        e2e = self.steps()[self.index(lambda s: "bridge_e2e.py" in s.get("run", ""))]
+        self.assertNotIn("continue-on-error", e2e)
+
+    def test_the_sealed_e2e_output_is_kept_three_days_and_uploaded_even_on_failure(self):
+        upload = self.steps()[self.index(lambda s: s.get("name", "").startswith("Upload the sealed e2e"))]
+        self.assertEqual(upload["with"]["retention-days"], 3)
+        self.assertEqual(upload.get("if"), "always()")
+        self.assertIn("bridge-e2e-e2e-out", upload["with"]["path"])
+
+    def test_the_workflow_still_never_publishes(self):
+        text = (ROOT / ".github/workflows/bridge-release.yml").read_text(encoding="utf-8")
+        for forbidden in ("release edit", "--draft=false", "--latest", "--prerelease=false", "release publish"):
+            self.assertNotIn(forbidden, text)
+
+
+if __name__ == "__main__":
+    unittest.main()
