@@ -1,6 +1,8 @@
 import base64
+import contextlib
 import gzip
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -16,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 import app_release_identity
 import bridge_release
+from app_release_artifacts import RECEIPTS
 from bridge_release import (BRIDGE_DESTINATION, bridge_version, build, draft, fetch, parse_latest, verify_outputs, _child_env)
 
 # The feed the 0.18.0 Electron release published, as GitHub serves it (aios-companion-releases, 15 Nov 2026).
@@ -135,7 +138,7 @@ class BridgeReleaseTests(unittest.TestCase):
 
     def test_fetch_takes_the_go_release_only_when_each_asset_matches_github_and_the_checksum_list(self):
         zip_bytes = b"verified-archive"
-        receipt = b'{"receipt": true}'
+        receipt = receipt_bytes("v0.19.2")
         zip_digest = hashlib.sha256(zip_bytes).hexdigest()
         sums = f"{zip_digest}  Companion_0.19.2_windows_amd64.zip\n".encode()
         contents = {"Companion_0.19.2_windows_amd64.zip": zip_bytes,
@@ -155,7 +158,8 @@ class BridgeReleaseTests(unittest.TestCase):
             Path(path).write_bytes(contents[name])
 
         names = fetch("v0.19.2", "AIOSCompanion/companion-app-releases", self.folder / "in", request, download)
-        self.assertEqual(sorted(names), sorted(contents))
+        self.assertEqual(names, ["Companion_0.19.2_windows_amd64.zip", "companion-release-windows-amd64.json",
+                                 "SHA256SUMS-windows-amd64.txt"])
 
     def test_fetch_refuses_an_archive_that_the_checksum_list_does_not_name(self):
         zip_bytes = b"tampered"
@@ -254,6 +258,188 @@ class BridgeReleaseTests(unittest.TestCase):
         self.assertNotIn("GITHUB_TOKEN", child)
         self.assertEqual(child["GOTOOLCHAIN"], "local")
         self.assertEqual(child["PATH"], "p")
+
+
+G1 = RECEIPTS["windows-amd64"][1]
+G2 = RECEIPTS["windows-amd64"][2]
+
+
+def receipt_bytes(tag, version=None):
+    """A receipt as the builder writes it, for the release tag (its version defaults to the tag's)."""
+    value = version or tag[1:]
+    return json.dumps({"schema": 1, "platform": "windows-amd64", "tag": tag, "version": value, "signing": "unsigned-windows",
+                       "source_sha": "a" * 40, "assets": {f"Companion_{value}_windows_amd64.zip": "0" * 64,
+                                                           "SHA256SUMS-windows-amd64.txt": "1" * 64}}, indent=2).encode()
+
+
+def go_release(tag, receipts, zip_bytes=b"verified-archive"):
+    """A Go release's draft as GitHub serves it: the archive, its checksum list and the given receipts, with GitHub's digests."""
+    zip_name = f"Companion_{tag[1:]}_windows_amd64.zip"
+    contents = {zip_name: zip_bytes,
+                "SHA256SUMS-windows-amd64.txt": f"{hashlib.sha256(zip_bytes).hexdigest()}  {zip_name}\n".encode(), **receipts}
+    assets = [{"name": n, "id": i, "digest": "sha256:" + hashlib.sha256(c).hexdigest()}
+              for i, (n, c) in enumerate(contents.items(), start=10)]
+    release = {"tag_name": tag, "draft": True, "assets": assets}
+
+    def request(method, path):
+        if "releases?" in path:
+            return [release]
+        raise AssertionError(path)
+
+    def download(repository, asset_id, path):
+        name = next(a["name"] for a in assets if a["id"] == asset_id)
+        Path(path).write_bytes(contents[name])
+
+    return request, download
+
+
+class ReceiptSelectionTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.folder = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def fetch_release(self, tag, receipts):
+        request, download = go_release(tag, receipts)
+        return fetch(tag, "AIOSCompanion/companion-app-releases", self.folder / "in", request, download)
+
+    def test_a_v0_19_5_shaped_release_takes_generation_two_not_the_generation_one_copy_of_v0_19_4(self):
+        names = self.fetch_release("v0.19.5", {G1: receipt_bytes("v0.19.4"), G2: receipt_bytes("v0.19.5")})
+        self.assertEqual(names[1], G2)
+        self.assertEqual(bridge_release.select_receipt(self.folder / "in", "v0.19.5"), G2)
+
+    def test_when_both_generations_name_the_release_the_higher_generation_is_taken(self):
+        names = self.fetch_release("v0.19.5", {G1: receipt_bytes("v0.19.5"), G2: receipt_bytes("v0.19.5")})
+        self.assertEqual(names[1], G2)
+
+    def test_an_older_single_receipt_release_still_bridges(self):
+        names = self.fetch_release("v0.19.2", {G1: receipt_bytes("v0.19.2")})
+        self.assertEqual(names, ["Companion_0.19.2_windows_amd64.zip", G1, "SHA256SUMS-windows-amd64.txt"])
+
+    def test_a_release_that_no_receipt_names_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "No Go release receipt names v0.19.5"):
+            self.fetch_release("v0.19.5", {G1: receipt_bytes("v0.19.4"), G2: receipt_bytes("v0.19.4")})
+
+    def test_a_receipt_whose_version_is_another_is_not_taken_for_the_release(self):
+        with self.assertRaisesRegex(ValueError, "No Go release receipt names"):
+            self.fetch_release("v0.19.5", {G2: receipt_bytes("v0.19.5", version="0.19.4")})
+
+    def test_a_release_with_no_receipt_at_all_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "No Go release receipt names"):
+            self.fetch_release("v0.19.5", {})
+
+    def test_a_receipt_that_does_not_read_is_refused_rather_than_skipped(self):
+        with self.assertRaisesRegex(ValueError, "is not a readable receipt"):
+            self.fetch_release("v0.19.5", {G2: b"not json", G1: receipt_bytes("v0.19.5")})
+
+    def test_build_hands_package_bridge_the_generation_two_receipt_and_the_archive(self):
+        inp = self.folder / "in"
+        inp.mkdir()
+        (inp / "Companion_0.19.5_windows_amd64.zip").write_bytes(b"zip")
+        (inp / G1).write_bytes(receipt_bytes("v0.19.4"))
+        (inp / G2).write_bytes(receipt_bytes("v0.19.5"))
+        source = self.folder / "source"
+        (source / "scripts").mkdir(parents=True)
+        (source / "scripts" / "package-bridge.ps1").write_text("# reviewed script\n", encoding="utf-8")
+        calls = []
+
+        def run(args, **kwargs):
+            calls.append(args)
+            write_outputs(Path(args[args.index("-OutDir") + 1]), "0.19.5")
+            return subprocess.CompletedProcess(args, 0)
+
+        env = {"TAG": "v0.19.5", "BRIDGE_INPUT_DIR": str(inp), "BRIDGE_OUT_DIR": str(self.folder / "out")}
+        with patch("app_release.source_identity", return_value=(source, None, None)):
+            build(env, run=run)
+        args = calls[0]
+        self.assertEqual(Path(args[args.index("-Receipt") + 1]).name, G2)
+        self.assertEqual(Path(args[args.index("-Archive") + 1]).name, "Companion_0.19.5_windows_amd64.zip")
+
+    def test_build_refuses_when_no_receipt_names_the_release(self):
+        inp = self.folder / "in"
+        inp.mkdir()
+        (inp / "Companion_0.19.5_windows_amd64.zip").write_bytes(b"zip")
+        (inp / G1).write_bytes(receipt_bytes("v0.19.4"))
+        (inp / G2).write_bytes(receipt_bytes("v0.19.4"))
+        env = {"TAG": "v0.19.5", "BRIDGE_INPUT_DIR": str(inp), "BRIDGE_OUT_DIR": str(self.folder / "out")}
+        with patch("app_release.source_identity", return_value=(self.folder, None, None)):
+            with self.assertRaisesRegex(ValueError, "No Go release receipt names"):
+                build(env, run=lambda *a, **k: self.fail("package-bridge must not run"))
+
+
+def selection_outcome():
+    """The selection tests' result, run quietly."""
+    suite = unittest.defaultTestLoader.loadTestsFromTestCase(ReceiptSelectionTests)
+    return unittest.TextTestRunner(stream=io.StringIO()).run(suite)
+
+
+class ReceiptSelectionMutantTests(unittest.TestCase):
+    """Each mutant is a plausible wrong selection. The selection tests must fail under every one, and pass on the real code."""
+
+    original_select = staticmethod(bridge_release.select_receipt)
+
+    def test_the_real_selection_passes_the_selection_tests(self):
+        self.assertTrue(selection_outcome().wasSuccessful())
+
+    def assert_killed(self, label, replacements):
+        with contextlib.ExitStack() as stack:
+            for attribute, replacement in replacements.items():
+                stack.enter_context(patch.object(bridge_release, attribute, replacement))
+            outcome = selection_outcome()
+        self.assertFalse(outcome.wasSuccessful(), f"mutant survived: {label}")
+
+    def test_mutant_ascending_order_is_killed(self):
+        def ascending():
+            return [RECEIPTS["windows-amd64"][g] for g in sorted(RECEIPTS["windows-amd64"])]
+        self.assert_killed("ascending generations", {"receipt_candidates": ascending})
+
+    def test_mutant_generation_one_only_is_killed(self):
+        self.assert_killed("generation one only", {"receipt_candidates": lambda: [G1]})
+
+    def test_mutant_no_tag_check_is_killed(self):
+        def first_present(folder, tag):
+            for name in bridge_release.receipt_candidates():
+                if (Path(folder) / name).is_file():
+                    return name
+            raise ValueError(f"No Go release receipt names {tag}")
+        self.assert_killed("first receipt present", {"select_receipt": first_present})
+
+    def test_mutant_fallback_to_the_oldest_copy_is_killed(self):
+        original = self.original_select
+
+        def fallback(folder, tag):
+            try:
+                return original(folder, tag)
+            except ValueError:
+                return bridge_release.receipt_candidates()[-1]
+        self.assert_killed("fallback when none names the release", {"select_receipt": fallback})
+
+    def test_mutant_unreadable_receipt_skipped_is_killed(self):
+        def skip_unreadable(folder, tag):
+            value = tag[1:]
+            for name in bridge_release.receipt_candidates():
+                path = Path(folder) / name
+                if not path.is_file():
+                    continue
+                try:
+                    receipt = json.loads(path.read_text(encoding="utf-8"))
+                except (ValueError, UnicodeDecodeError):
+                    continue
+                if isinstance(receipt, dict) and receipt.get("tag") == "v" + value and receipt.get("version") == value:
+                    return name
+            raise ValueError(f"No Go release receipt names {tag}")
+        self.assert_killed("unreadable receipt skipped", {"select_receipt": skip_unreadable})
+
+    def test_mutant_tag_only_without_version_is_killed(self):
+        def tag_only(folder, tag):
+            for name in bridge_release.receipt_candidates():
+                path = Path(folder) / name
+                if path.is_file() and json.loads(path.read_text(encoding="utf-8")).get("tag") == tag:
+                    return name
+            raise ValueError(f"No Go release receipt names {tag}")
+        self.assert_killed("tag matched, version not checked", {"select_receipt": tag_only})
 
 
 class BridgeWorkflowTests(unittest.TestCase):
