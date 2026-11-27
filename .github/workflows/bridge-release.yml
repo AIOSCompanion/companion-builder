@@ -30,15 +30,13 @@ jobs:
     if: github.repository == 'AIOSCompanion/companion-builder' && github.ref == 'refs/heads/main'
     runs-on: windows-2022
     environment: release-signing
-    timeout-minutes: 60
+    timeout-minutes: 90
     defaults:
       run:
         shell: bash
     env:
       TAG: ${{ inputs.tag }}
       APP_SOURCE_DIR: ${{ github.workspace }}/source
-      BRIDGE_INPUT_DIR: ${{ runner.temp }}/bridge-input
-      BRIDGE_OUT_DIR: ${{ runner.temp }}/bridge-out
       LOG_RECIPIENT: ${{ vars.TEST_LOG_RECIPIENT }}
       GOTOOLCHAIN: local
     steps:
@@ -49,6 +47,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      # The runner context is not allowed in a job's env block, so the run's folders are exported here for the later steps.
+      - name: Export the bridge and e2e folders
+        run: |
+          echo "BRIDGE_INPUT_DIR=$RUNNER_TEMP/bridge-input" >> "$GITHUB_ENV"
+          echo "BRIDGE_OUT_DIR=$RUNNER_TEMP/bridge-out" >> "$GITHUB_ENV"
+          echo "E2E_OUT_DIR=$RUNNER_TEMP/e2e-out" >> "$GITHUB_ENV"
       - name: Protect the trusted scripts before any private code is present
         run: python -I -B scripts/app_release_snapshot.py "$RUNNER_TEMP/trusted"
       - name: Import the team public log key
@@ -109,8 +113,37 @@ jobs:
           python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name build-bridge
           --log-dir "$RUNNER_TEMP/bridge-logs" --
           python -I -B "$RUNNER_TEMP/trusted/bridge_release.py" build
-      - name: Verify trusted scripts before the draft is created
+      - name: Verify trusted scripts before the e2e and the draft
         run: python -I -B "$RUNNER_TEMP/trusted/snapshot_trusted.py" verify --dest "$RUNNER_TEMP/trusted"
+      # The e2e runs the built bridge on this runner, which is the only place the bridge installs. It uses no publishing
+      # credential: its one token is the job's read-only github.token, for the public 0.18.0 release record. Its logs and
+      # screenshots are sealed to the team log key by run_sealed.py, so the uploaded artifact holds only ciphertext.
+      # The draft below runs only when this step succeeds.
+      - name: Set up Node 22 for the e2e's update driver
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Make the e2e output folder
+        run: mkdir -p "$E2E_OUT_DIR"
+      - name: Old 0.18.0 updates to the bridge through its own updater, then the bridge is checked (sealed)
+        timeout-minutes: 45
+        env:
+          E2E_GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          python -I -B "$RUNNER_TEMP/trusted/run_sealed.py" --name bridge-e2e
+          --log-dir "$RUNNER_TEMP/bridge-logs" --seal-dir "$E2E_OUT_DIR" --
+          python -I -B "$RUNNER_TEMP/trusted/bridge_e2e.py" --tag "$TAG"
+          --bridge-dir "$BRIDGE_OUT_DIR" --out "$E2E_OUT_DIR"
+      - name: Upload the sealed e2e logs and screenshots (3 days)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bridge-e2e-sealed
+          path: |
+            ${{ runner.temp }}/bridge-logs/bridge-e2e.log.gpg
+            ${{ runner.temp }}/bridge-logs/bridge-e2e-e2e-out
+          retention-days: 3
+          if-no-files-found: warn
       - name: Create the bridge installer as an unpublished draft in the updater repository
         env:
           GH_TOKEN: ${{ secrets.PUBLISH_RELEASES_TOKEN }}
