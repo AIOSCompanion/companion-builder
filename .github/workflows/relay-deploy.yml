@@ -12,8 +12,9 @@ name: Deploy the aiosXaegra relay from the public builder
 # to the last delivered BACKEND_DOTENV_B64. Changes to that secret, or to the ACCOUNT_DEVICES_ENABLED
 # and DASHBOARD_TOKEN inputs, still go through deploy.yml, which delivers them.
 #
-# The read token travels from the source job to the deploy job as a masked job output. It is read-only,
-# scoped to aiosxaegra, and expires within one hour. It is never written to a file or an artifact.
+# The read token is minted inside the deploy job (GitHub drops a secret job output, so it cannot cross
+# jobs). It is read-only, scoped to aiosxaegra, and expires within one hour. It is never written to a
+# file or an artifact. The job runs only after the relay-deploy approval.
 
 on:
   workflow_dispatch:
@@ -31,14 +32,21 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  source:
-    name: Mint the read token for the approved commit
+  deploy:
+    name: Deploy the verified commit on the relay VM
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    environment: source-access
-    timeout-minutes: 10
-    outputs:
-      token: ${{ steps.source-token.outputs.token }}
+    environment: relay-deploy
+    # Matches aiosxaegra deploy.yml. Cancelling this job does not cancel the deploy: the
+    # companion-deploy unit on the VM owns it and finishes or rolls back within its own bounds.
+    timeout-minutes: 100
+    permissions:
+      contents: read
+      id-token: write   # keyless Workload Identity Federation for the deploy identity
+    env:
+      RELAY_SHA: ${{ inputs.relay_sha }}
+      RELAY_SOURCE_URL: https://github.com/AIOSCompanion/aiosxaegra
+      RELAY_DOMAIN: 34-51-149-24.sslip.io
     steps:
       - name: Require the trusted builder main branch and an exact commit
         env:
@@ -69,27 +77,8 @@ jobs:
           set -euo pipefail
           found="$(gh api "repos/AIOSCompanion/aiosxaegra/commits/${RELAY_SHA}" --jq '.sha')"
           test "$found" = "$RELAY_SHA"
-          echo "aiosxaegra commit ${RELAY_SHA} exists; the deploy job checks it out next"
+          echo "aiosxaegra commit ${RELAY_SHA} exists; it is checked out next"
 
-  deploy:
-    name: Deploy the verified commit on the relay VM
-    if: github.ref == 'refs/heads/main'
-    needs: source
-    runs-on: ubuntu-latest
-    environment: relay-deploy
-    # Matches aiosxaegra deploy.yml. Cancelling this job does not cancel the deploy: the
-    # companion-deploy unit on the VM owns it and finishes or rolls back within its own bounds.
-    timeout-minutes: 100
-    permissions:
-      contents: read
-      id-token: write   # keyless Workload Identity Federation for the deploy identity
-    env:
-      RELAY_SHA: ${{ inputs.relay_sha }}
-      RELAY_SOURCE_URL: https://github.com/AIOSCompanion/aiosxaegra
-      RELAY_DOMAIN: 34-51-149-24.sslip.io
-    steps:
-      - name: Require the trusted builder main branch
-        run: test "$GITHUB_REF" = "refs/heads/main"
 
       - name: Check out the builder (this public repo) for the health check
         uses: actions/checkout@v4
@@ -101,7 +90,7 @@ jobs:
         with:
           repository: AIOSCompanion/aiosxaegra
           ref: ${{ inputs.relay_sha }}
-          token: ${{ needs.source.outputs.token }}
+          token: ${{ steps.source-token.outputs.token }}
           path: relay
           fetch-depth: 1
           persist-credentials: false
@@ -122,7 +111,7 @@ jobs:
           DEPLOY_REVISION: ${{ inputs.relay_sha }}
           DEPLOY_SOURCE_URL: ${{ env.RELAY_SOURCE_URL }}
           DEPLOY_DOMAIN: ${{ env.RELAY_DOMAIN }}
-          GH_PULL_TOKEN: ${{ needs.source.outputs.token }}
+          GH_PULL_TOKEN: ${{ steps.source-token.outputs.token }}
           SERVING_REPOSITORY: ${{ vars.RELAY_SERVING_REPOSITORY }}
         with:
           script_file: relay/scripts/deploy_remote.sh

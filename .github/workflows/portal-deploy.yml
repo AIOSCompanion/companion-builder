@@ -8,8 +8,9 @@ name: Deploy the auth portal from the public builder
 #   mode: live     publishes Firebase Hosting site auth-portal (app.aioscompanion.com).
 #
 # Both modes need the portal-deploy approval (the environment requires a reviewer for every run).
-# The private read token travels from the source job as a masked job output, is read-only, scoped
-# to AIOS_Commercial, expires within an hour, and is never written to a file or an artifact.
+# The private read token is minted inside the deploy job (GitHub drops a secret job output, so it
+# cannot cross jobs), is read-only, scoped to AIOS_Commercial, expires within an hour, and is never
+# written to a file or an artifact. The job runs only after the portal-deploy approval.
 
 on:
   workflow_dispatch:
@@ -33,14 +34,17 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  source:
-    name: Mint the read token for the approved commit
+  deploy:
+    name: Build, gate and deploy the portal (${{ inputs.mode }})
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    environment: source-access
-    timeout-minutes: 10
-    outputs:
-      token: ${{ steps.source-token.outputs.token }}
+    environment: portal-deploy
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write   # keyless Workload Identity Federation to Firebase, as in deploy-portal.yml
+    env:
+      PORTAL_SHA: ${{ inputs.aios_commercial_sha }}
     steps:
       - name: Require the trusted builder main branch and an exact commit
         env:
@@ -71,30 +75,15 @@ jobs:
           set -euo pipefail
           found="$(gh api "repos/AIOSCompanion/AIOS_Commercial/commits/${PORTAL_SHA}" --jq '.sha')"
           test "$found" = "$PORTAL_SHA"
-          echo "AIOS_Commercial commit ${PORTAL_SHA} exists; the deploy job checks it out next"
+          echo "AIOS_Commercial commit ${PORTAL_SHA} exists; it is checked out next"
 
-  deploy:
-    name: Build, gate and deploy the portal (${{ inputs.mode }})
-    if: github.ref == 'refs/heads/main'
-    needs: source
-    runs-on: ubuntu-latest
-    environment: portal-deploy
-    timeout-minutes: 60
-    permissions:
-      contents: read
-      id-token: write   # keyless Workload Identity Federation to Firebase, as in deploy-portal.yml
-    env:
-      PORTAL_SHA: ${{ inputs.aios_commercial_sha }}
-    steps:
-      - name: Require the trusted builder main branch
-        run: test "$GITHUB_REF" = "refs/heads/main"
 
       - name: Check out AIOS_Commercial at the approved commit
         uses: actions/checkout@v4
         with:
           repository: AIOSCompanion/AIOS_Commercial
           ref: ${{ inputs.aios_commercial_sha }}
-          token: ${{ needs.source.outputs.token }}
+          token: ${{ steps.source-token.outputs.token }}
           path: portal-src
           fetch-depth: 1
           persist-credentials: false
