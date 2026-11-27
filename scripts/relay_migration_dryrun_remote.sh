@@ -488,9 +488,17 @@ import json
 import os
 import sys
 
-import psycopg
-from react_agent.link.account_registry import MAX_REGISTRY_DEVICES
-from react_agent.link.chain import ChainError
+# react_agent is not an installed package in the image: the wheel lists only src/agent_server, so the package sits at
+# /app/graphs/react_agent. The app itself puts that directory on sys.path (src/agent_server/main.py), and alembic
+# does not. This probe does the same, from its working directory (/app, the image's WORKDIR), because `python -I`
+# ignores PYTHONPATH and the working directory.
+GRAPHS_DIR = os.path.join(os.getcwd(), "graphs")
+if GRAPHS_DIR not in sys.path:
+    sys.path.insert(0, GRAPHS_DIR)
+
+import psycopg  # noqa: E402 - after the bootstrap above, which the react_agent imports need
+from react_agent.link.account_registry import MAX_REGISTRY_DEVICES  # noqa: E402
+from react_agent.link.chain import ChainError  # noqa: E402
 
 
 def refuse(code, message):

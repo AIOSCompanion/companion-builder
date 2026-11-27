@@ -629,5 +629,100 @@ class FailedMigrationStillDropsTheCopyTests(unittest.TestCase):
         self.assertNotIn('stub-password', combined)
 
 
+PROBE_BOOTSTRAP = (
+    'GRAPHS_DIR = os.path.join(os.getcwd(), "graphs")\n'
+    'if GRAPHS_DIR not in sys.path:\n'
+    '    sys.path.insert(0, GRAPHS_DIR)\n'
+)
+
+
+def probe_program():
+    match = re.search(r"<<'PROBE'\n(.*?)\nPROBE\n", PROGRAM.read_text(encoding='utf-8'), re.S)
+    assert match, 'the PROBE program is missing'
+    return match.group(1) + '\n'
+
+
+def build_image_layout(root):
+    """The image's layout: /app holds alembic/ and graphs/ (react_agent lives there), and site-packages holds
+    psycopg, alembic and sqlalchemy but NOT react_agent, because the wheel lists only src/agent_server."""
+    app = root / 'app'
+    versions = app / 'alembic' / 'versions'
+    versions.mkdir(parents=True)
+    (versions / '20261126160000_chain_devices_to_account_rows.py').write_text(
+        '"""Fixture: the chain import as the image ships it."""\n'
+        'from alembic import op\n'
+        'from sqlalchemy import text\n\n'
+        'revision = "b20261126_chain_import"\n\n'
+        'def _fold(owner, links):\n'
+        '    raise NotImplementedError\n', encoding='utf-8', newline='\n')
+    package = app / 'graphs' / 'react_agent' / 'link'
+    package.mkdir(parents=True)
+    (app / 'graphs' / 'react_agent' / '__init__.py').write_text('', encoding='utf-8')
+    (package / '__init__.py').write_text('', encoding='utf-8')
+    (package / 'account_registry.py').write_text('MAX_REGISTRY_DEVICES = 10\n', encoding='utf-8', newline='\n')
+    (package / 'chain.py').write_text(
+        'class ChainError(Exception):\n    pass\n\n\n'
+        'def fold_chain(*args, **kwargs):\n    raise NotImplementedError\n\n\n'
+        'def verify_genesis(*args, **kwargs):\n    raise NotImplementedError\n', encoding='utf-8', newline='\n')
+    site = root / 'site-packages'
+    (site / 'psycopg').mkdir(parents=True)
+    (site / 'psycopg' / '__init__.py').write_text(
+        'class ProbeReached(Exception):\n    pass\n\n\n'
+        'def connect(*args, **kwargs):\n'
+        '    raise ProbeReached("the imports resolved; the probe reached the database boundary")\n',
+        encoding='utf-8', newline='\n')
+    (site / 'alembic').mkdir()
+    (site / 'alembic' / '__init__.py').write_text('op = None\n', encoding='utf-8', newline='\n')
+    (site / 'sqlalchemy').mkdir()
+    (site / 'sqlalchemy' / '__init__.py').write_text('def text(sql):\n    return sql\n', encoding='utf-8', newline='\n')
+    return app, site
+
+
+def run_probe_as_the_image_runs_it(app, site, source):
+    """`python -I -B - before < probe.py` from /app. The only addition is the fake site-packages directory, which
+    stands in for the image's installed packages. -I keeps the real semantics: no PYTHONPATH, no script directory,
+    no user site, and PYTHONPATH below is set to a path that does not exist to prove it is ignored."""
+    wrapper = (f"import sys; sys.path.insert(0, {str(site)!r}); "
+               "exec(compile(sys.stdin.read(), 'probe.py', 'exec'), {'__name__': '__main__'})")
+    env = {
+        'PATH': os.environ.get('PATH', ''),
+        'PYTHONPATH': str(app / 'does-not-exist'),
+        'RELAY_DRYRUN_DSN': 'postgresql://user:pw@127.0.0.1:1/dryrun',
+        'RELAY_DRYRUN_DB': 'dryrun',
+        'RELAY_DRYRUN_START': 'w20261031_usage_turn_ts',
+        'RELAY_DRYRUN_HEAD': 'c20261126_sign_out_everywhere',
+    }
+    return subprocess.run([sys.executable, '-I', '-B', '-c', wrapper, 'before'], input=source, cwd=app, env=env,
+                          capture_output=True, text=True, timeout=120)
+
+
+class ProbeImportTests(unittest.TestCase):
+    """The probe runs in the image with react_agent reachable only from /app/graphs (the failure of 2026-11-27)."""
+
+    def test_the_probe_is_the_one_that_adds_graphs_before_it_imports_react_agent(self):
+        source = probe_program()
+        self.assertIn(PROBE_BOOTSTRAP, source)
+        self.assertLess(source.index(PROBE_BOOTSTRAP), source.index('from react_agent'))
+
+    def test_under_python_I_from_the_image_layout_the_probe_reaches_the_database_boundary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app, site = build_image_layout(Path(tmp))
+            result = run_probe_as_the_image_runs_it(app, site, probe_program())
+        self.assertNotIn('No module named', result.stderr, result.stderr)
+        self.assertIn('ProbeReached', result.stderr, result.stderr)
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_control_without_the_bootstrap_fails_the_way_the_real_run_failed(self):
+        # The same layout and command, with the bootstrap removed, must reproduce the failure. This is the proof that
+        # the layout above reaches the same import error as the image, so the passing test is not vacuous.
+        source = probe_program()
+        self.assertIn(PROBE_BOOTSTRAP, source)
+        with tempfile.TemporaryDirectory() as tmp:
+            app, site = build_image_layout(Path(tmp))
+            result = run_probe_as_the_image_runs_it(app, site, source.replace(PROBE_BOOTSTRAP, ''))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ModuleNotFoundError: No module named 'react_agent'", result.stderr, result.stderr)
+
+
 if __name__ == '__main__':
     unittest.main()
