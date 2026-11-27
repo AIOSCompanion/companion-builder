@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 import bridge_e2e  # noqa: E402
 from bridge_e2e import (BRIDGE_UNINSTALL_GUID, IMPORT_FINISHED, PROGRAM, Run, check_feed_served,  # noqa: E402
-                        check_go_app, check_import_pending, check_old_app_gone, check_old_data_detected,
+                        check_go_app, check_import_pending, matching_pids, check_old_app_gone, check_old_data_detected,
                         check_stable_install, check_uninstall, check_update_path, point_feed_at, read_receipt,
                         seed_old_data, seed_paths, serve_feed, takeover_exit_line)
 import urllib.request  # noqa: E402
@@ -286,43 +286,81 @@ class FeedRequestTests(unittest.TestCase):
 
 
 class GoAppIdentityTests(unittest.TestCase):
+    """The Go app is judged over the window: a pid that runs the stable program with the receipt's bytes in every sample."""
     STABLE = Path("/tmp/Programs/Companion")
-    GOOD_SHA = "ab" * 32
     RECEIPT = {"schema": 1, "version": VERSION, "files": {PROGRAM: "ab" * 32, "companion-cli.exe": "cd" * 32}}
+    WINDOW = [{4321}] * 13
 
-    def check(self, **overrides):
-        args = dict(stable=self.STABLE, version=VERSION, alive=True, image=str(self.STABLE / PROGRAM),
-                    image_sha256=self.GOOD_SHA, receipt=self.RECEIPT, home_created=True)
-        args.update(overrides)
-        return check_go_app(**args)
+    def check(self, samples=WINDOW, receipt=RECEIPT, home=True, version=VERSION):
+        return check_go_app(self.STABLE, version, samples, receipt, home)
 
-    def test_the_stable_program_at_the_bridge_version_with_matching_bytes_passes(self):
+    def test_an_app_the_takeover_started_counts_as_running_and_no_second_copy_is_needed(self):
+        # The takeover launched the single-instance app as pid 4321; this run only samples it, and the pid is recorded.
         ok, detail = self.check()
         self.assertTrue(ok, detail)
+        self.assertIn("4321", detail)
 
-    def test_a_process_not_started_by_this_run_fails(self):
-        self.assertFalse(self.check(alive=False)[0])
+    def test_the_pid_must_be_present_in_every_sample_of_the_window(self):
+        samples = [{4321}] * 6 + [set()] + [{4321}] * 6
+        self.assertFalse(self.check(samples)[0])
 
-    def test_a_process_from_another_program_path_fails_even_at_the_stable_name(self):
-        self.assertFalse(self.check(image="/tmp/old/Companion.exe")[0])
+    def test_a_replacement_pid_does_not_stand_in_for_the_one_that_stopped(self):
+        self.assertFalse(self.check([{1}] * 6 + [{2}] * 7)[0])
 
-    def test_a_rolled_back_program_fails_when_no_receipt_names_the_bridge(self):
+    def test_no_matching_process_at_any_sample_fails(self):
+        self.assertFalse(self.check([set()] * 13)[0])
+
+    def test_a_rolled_back_install_with_no_receipt_for_the_bridge_fails(self):
         ok, detail = self.check(receipt=None)
         self.assertFalse(ok)
         self.assertIn("no install receipt", detail)
 
-    def test_an_older_version_in_the_receipt_fails(self):
+    def test_a_receipt_naming_another_version_fails(self):
         self.assertFalse(self.check(receipt={**self.RECEIPT, "version": "0.18.0"})[0])
 
-    def test_a_program_whose_bytes_are_not_the_receipts_fails(self):
-        self.assertFalse(self.check(image_sha256="ee" * 32)[0])
-        self.assertFalse(self.check(image_sha256=None)[0])
-
     def test_a_missing_home_folder_fails(self):
-        self.assertFalse(self.check(home_created=False)[0])
+        self.assertFalse(self.check(home=False)[0])
 
-    def test_the_program_path_must_be_read(self):
-        self.assertFalse(self.check(image=None)[0])
+    def test_an_empty_window_fails(self):
+        self.assertFalse(self.check([])[0])
+
+
+class MatchingProcessTests(unittest.TestCase):
+    STABLE = Path("/tmp/Programs/Companion")
+    GOOD = {str(STABLE / PROGRAM): "ab" * 32}
+
+    def sha_table(self, table):
+        calls = []
+
+        def sha_of(image):
+            calls.append(image)
+            return table.get(image)
+        return sha_of, calls
+
+    def test_the_stable_program_with_the_receipt_bytes_matches(self):
+        sha_of, _ = self.sha_table(self.GOOD)
+        self.assertEqual(matching_pids([(10, str(self.STABLE / PROGRAM))], self.STABLE, "ab" * 32, sha_of), {10})
+
+    def test_an_old_program_at_the_same_path_with_other_bytes_does_not_match(self):
+        sha_of, _ = self.sha_table({str(self.STABLE / PROGRAM): "0e" * 32})
+        self.assertEqual(matching_pids([(10, str(self.STABLE / PROGRAM))], self.STABLE, "ab" * 32, sha_of), set())
+
+    def test_another_program_path_with_the_same_bytes_does_not_match(self):
+        sha_of, _ = self.sha_table({"/tmp/old/Companion.exe": "ab" * 32})
+        self.assertEqual(matching_pids([(10, "/tmp/old/Companion.exe")], self.STABLE, "ab" * 32, sha_of), set())
+
+    def test_a_process_whose_path_cannot_be_read_does_not_match(self):
+        sha_of, _ = self.sha_table(self.GOOD)
+        self.assertEqual(matching_pids([(10, None)], self.STABLE, "ab" * 32, sha_of), set())
+
+    def test_without_a_receipt_hash_nothing_matches(self):
+        sha_of, _ = self.sha_table(self.GOOD)
+        self.assertEqual(matching_pids([(10, str(self.STABLE / PROGRAM))], self.STABLE, None, sha_of), set())
+
+    def test_the_file_is_hashed_only_for_a_process_at_the_stable_path(self):
+        sha_of, calls = self.sha_table(self.GOOD)
+        matching_pids([(1, "/tmp/elsewhere/Companion.exe")], self.STABLE, "ab" * 32, sha_of)
+        self.assertEqual(calls, [])
 
 
 class TakeoverExitLineTests(unittest.TestCase):

@@ -59,6 +59,7 @@ IMPORT_FINISHED = "preview import finished"
 USER_AGENT = "companion-builder-e2e"
 DRIVER = "bridge_e2e_cdp.mjs"
 NEW_APP_SECONDS = 60
+GO_SAMPLE_SECONDS = 5
 OLD_APP_SECONDS = 900
 BRIDGE_SECONDS = 900
 INSTALL_SECONDS = 900
@@ -289,28 +290,42 @@ def read_receipt(stable: Path) -> dict | None:
     return receipt if isinstance(receipt, dict) else None
 
 
-def check_go_app(stable: Path, version: str, alive: bool, image: str | None, image_sha256: str | None,
-                 receipt: dict | None, home_created: bool) -> tuple[bool, str]:
-    """The process this run started is the Go app at the stable path, at the bridge version. Its image path must be the stable
-    program, its bytes must be the ones the bridge version's install receipt records, and the receipt must name that version.
-    A process from the old program files (a rolled-back takeover) fails here, although it runs from the same path."""
-    if not alive:
-        return False, "the process this run started is not running"
-    if not image:
-        return False, "the running process's program path could not be read"
-    if _norm(image) != _norm(Path(stable) / PROGRAM):
-        return False, f"the running process is {image}, not the stable program"
+def matching_pids(programs, stable: Path, recorded_sha256: str | None, sha_of) -> set[int]:
+    """The pids among programs ((pid, image) pairs) that run the stable program and whose bytes are the install receipt's entry
+    for it. sha_of(image) hashes a file; it is asked only for a process at the stable path."""
+    if not recorded_sha256:
+        return set()
+    found = set()
+    for pid, image in programs:
+        if image and _norm(image) == _norm(Path(stable) / PROGRAM) and sha_of(image) == recorded_sha256:
+            found.add(pid)
+    return found
+
+
+def check_go_app(stable: Path, version: str, samples: list[set[int]], receipt: dict | None,
+                 home_created: bool) -> tuple[bool, str]:
+    """The Go app is running at the stable path, at the bridge version, through the whole window.
+
+    samples holds, for each moment of the window, the pids that matching_pids found: a stable program whose bytes are the install
+    receipt's. The pass needs a pid present in every sample. It may be any process, not one this run started: the bridge's takeover
+    launches the app, and the app is single-instance, so a second launch from here would only hand off and exit. A rolled-back
+    install has no receipt for the bridge version and fails, as does any other path, version or bytes."""
     if receipt is None:
         return False, "no install receipt at the stable path, so the program cannot be tied to a version"
     if receipt.get("version") != version:
         return False, f"install receipt names {receipt.get('version')!r}, expected {version!r}"
-    recorded = (receipt.get("files") or {}).get(PROGRAM)
-    if not image_sha256 or recorded != image_sha256:
-        return False, "the running program does not match the bridge's install receipt"
+    if not samples:
+        return False, "the window was not sampled"
+    steady = set.intersection(*(set(sample) for sample in samples))
+    if not steady:
+        seen = set().union(*samples)
+        if not seen:
+            return False, "no running process at the stable path matched the install receipt"
+        return False, "the process that matched the install receipt did not stay alive through the window"
     if not home_created:
         return False, "the Go app's home folder was not created"
-    return True, f"the running {PROGRAM} is the stable program at {version} (its bytes match the install receipt)"
-
+    pids = ", ".join(str(pid) for pid in sorted(steady))
+    return True, f"the Go app ran through the window as pid {pids}, at {PROGRAM} {version}, bytes matching the install receipt"
 
 def read_logs_text(engine_home: Path, limit: int = 20 * 1024 * 1024) -> str:
     """The engine's own text files (logs and records), read as text. Binary stores are skipped by suffix."""
@@ -459,25 +474,21 @@ def capture(out: Path, name: str, script: Path, run: Run) -> None:
         run.log(f"screenshot {name} taken")
 
 
-def process_image(pid: int) -> str | None:
-    """The full program path of a running process (QueryFullProcessImageNameW), or None when it cannot be read."""
-    import ctypes
-    from ctypes import wintypes
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.OpenProcess.restype = wintypes.HANDLE
-    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
-    if not handle:
-        return None
-    try:
-        size = wintypes.DWORD(32768)
-        buffer = ctypes.create_unicode_buffer(size.value)
-        if not kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
-            return None
-        return buffer.value
-    finally:
-        kernel32.CloseHandle(handle)
+def running_programs() -> list[tuple[int, str | None]]:
+    """Every running Companion.exe as (pid, full program path). A path the system will not show is None."""
+    script = ("Get-CimInstance Win32_Process -Filter \"Name='Companion.exe'\" | "
+              "Select-Object ProcessId,ExecutablePath | ConvertTo-Json -Compress")
+    result = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                            capture_output=True, text=True, timeout=60, check=False)
+    if result.returncode:
+        raise E2EError(f"the running programs could not be listed (exit {result.returncode})")
+    text = result.stdout.strip()
+    if not text:
+        return []
+    data = json.loads(text)
+    if isinstance(data, dict):
+        data = [data]
+    return [(int(item["ProcessId"]), item.get("ExecutablePath")) for item in data]
 
 
 def sha256_file(path: Path | None) -> str | None:
@@ -506,6 +517,7 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     run = Run(args.out)
     servers, procs = [], []
+    go_pids: set[int] = set()
     try:
         version = bridge_release.bridge_version(args.tag)
         files = bridge_release.verify_outputs(args.bridge_dir, version)
@@ -550,6 +562,7 @@ def main(argv=None) -> int:
         script.write_text(SCREENSHOT_SCRIPT, encoding="utf-8")
         capture(args.out, "01-old-app-before-update", script, run)
 
+        launched_at = time.time()  # the update's start: the Go app's first writes come after it
         offset = takeover_log.stat().st_size if takeover_log.is_file() else 0
         port = free_port()
         old_proc = subprocess.Popen([str(stable / PROGRAM), f"--remote-debugging-port={port}"], cwd=str(stable))
@@ -580,14 +593,26 @@ def main(argv=None) -> int:
         ok, detail = check_feed_served(records, installer_name)
         run.check("feed_served_the_bridge", ok, detail)
 
-        launched_at = time.time()
-        new_proc = subprocess.Popen([str(stable / PROGRAM)], cwd=str(stable))
-        procs.append(new_proc)
-        time.sleep(NEW_APP_SECONDS)
-        alive = new_proc.poll() is None
-        image = process_image(new_proc.pid) if alive else None
-        ok, detail = check_go_app(stable, version, alive, image, sha256_file(Path(image)) if image else None,
-                                  read_receipt(stable), engine_home.is_dir())
+        # No second copy is launched: the takeover starts the app, and the app is single-instance. The check samples the
+        # running Companion.exe processes across the window and needs one at the stable path whose bytes match the receipt.
+        receipt = read_receipt(stable)
+        recorded = (receipt or {}).get("files", {}).get(PROGRAM) if receipt else None
+        hashes: dict[str, str | None] = {}
+
+        def hash_of(image: str) -> str | None:
+            if image not in hashes:
+                hashes[image] = sha256_file(Path(image))
+            return hashes[image]
+
+        samples: list[set[int]] = []
+        window_end = time.monotonic() + NEW_APP_SECONDS
+        while True:
+            samples.append(matching_pids(running_programs(), stable, recorded, hash_of))
+            if time.monotonic() >= window_end:
+                break
+            time.sleep(GO_SAMPLE_SECONDS)
+        go_pids.update(set().union(*samples))
+        ok, detail = check_go_app(stable, version, samples, receipt, engine_home.is_dir())
         run.check("go_app_launches", ok, detail)
         capture(args.out, "02-go-app-after-update", script, run)
 
@@ -613,6 +638,8 @@ def main(argv=None) -> int:
     finally:
         for proc in procs:
             stop(proc)
+        for pid in sorted(go_pids):  # the Go app this run found; a rolled-back run finds none
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, check=False)
         for server in servers:
             server.shutdown()
             server.server_close()
