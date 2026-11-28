@@ -8,9 +8,10 @@ from app_release_artifacts import SHA
 from app_release_identity import SOURCE
 
 RESOURCE_SOURCE = "AIOSCompanion/aios-desktop-app"
-# The desktop commit that carries the companion-arc manifest is aios-desktop-app PR #225, not yet merged. Until the lead sets this to
-# that merge commit, the resource checkout refuses to run (checkout() requires a full SHA), so nothing is staged from a guessed commit.
-RESOURCE_SHA = "13d4451a95099f114c39935e5aa0f5fca8b0a867"
+# The desktop commit the app's resources are staged from: aios-desktop-app main at the merge of #227 (the connectors' built-in
+# registration, machine-readable status and sign-in address), which the 0.20.0 engine's connector cards read. It also carries
+# #225 (the companion-arc manifest, 13d4451a). checkout() requires a full SHA, so nothing is staged from a guessed commit.
+RESOURCE_SHA = "616c6a86be6ff36bbeb328cac005bb63cb788d5f"
 
 
 def checkout(env, run=subprocess.run, *, resources=False):
